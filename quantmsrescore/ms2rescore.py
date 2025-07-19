@@ -61,13 +61,13 @@ configure_logging()
     help="Comma-separated list of features to use for annotation (read docs for default)",
 )
 @click.option(
-    "--ms2pip_model",
+    "--ms2_model",
     help="MS²PIP model (default: `HCD2021`)",
     type=str,
     default="HCD2021",
 )
 @click.option(
-    "--ms2pip_model_dir",
+    "--ms2_model_dir",
     help="The path of MS²PIP model (default: `./`)",
     type=str,
     default="./",
@@ -105,6 +105,11 @@ configure_logging()
     type=str,
     default="(.*)",
 )
+@click.option(
+    "--mask_modloss",
+    help="If modloss ions are masked to zeros in the ms2 model",
+    is_flag=True,
+)
 @click.pass_context
 def msrescore2feature(
     ctx,
@@ -115,8 +120,8 @@ def msrescore2feature(
     processes,
     feature_generators,
     only_features,
-    ms2pip_model_dir,
-    ms2pip_model,
+    ms2_model_dir,
+    ms2_model,
     force_model,
     find_best_model,
     ms2_tolerance,
@@ -125,6 +130,7 @@ def msrescore2feature(
     skip_deeplc_retrain,
     spectrum_id_pattern: str,
     psm_id_pattern: str,
+    mask_modloss
 ):
     """
     Annotate PSMs in an idXML file with additional features using specified models.
@@ -173,15 +179,19 @@ def msrescore2feature(
         The regex pattern for spectrum IDs.
     psm_id_pattern : str
         The regex pattern for PSM IDs.
+    mask_modloss: bool, optional
+        If modloss ions are masked to zeros in the ms2 model. `modloss`
+        ions are mostly useful for phospho MS2 prediciton model.
+        Defaults to True.
     """
 
     annotator = FeatureAnnotator(
         feature_generators=feature_generators,
         only_features=only_features,
-        ms2pip_model=ms2pip_model,
+        ms2_model=ms2_model,
         force_model=force_model,
         find_best_model=find_best_model,
-        ms2pip_model_path=ms2pip_model_dir,
+        ms2_model_path=ms2_model_dir,
         ms2_tolerance=ms2_tolerance,
         calibration_set_size=calibration_set_size,
         valid_correlations_size=valid_correlations_size,
@@ -190,6 +200,7 @@ def msrescore2feature(
         log_level=log_level.upper(),
         spectrum_id_pattern=spectrum_id_pattern,
         psm_id_pattern=psm_id_pattern,
+        mask_modloss=mask_modloss
     )
     annotator.build_idxml_data(idxml, mzml)
     annotator.annotate()

@@ -55,16 +55,13 @@ jobs:
         VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
         echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
         echo "Extracted version: $VERSION"
-
-    - name: Extract metadata for Docker
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ghcr.io/bigbio/quantms-rescoring
-        tags: |
-          type=raw,value=latest,enable={{is_default_branch}}
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
+        
+        # Extract major and minor version
+        MAJOR=$(echo $VERSION | cut -d'.' -f1)
+        MINOR=$(echo $VERSION | cut -d'.' -f2)
+        echo "MAJOR=$MAJOR" >> $GITHUB_OUTPUT
+        echo "MINOR=$MINOR" >> $GITHUB_OUTPUT
+        echo "Major.Minor: $MAJOR.$MINOR"
 
     - name: Build and Push QuantMS-Rescoring image
       uses: docker/build-push-action@v5
@@ -74,8 +71,7 @@ jobs:
         tags: |
           ghcr.io/bigbio/quantms-rescoring:latest
           ghcr.io/bigbio/quantms-rescoring:${{ steps.version.outputs.VERSION }}
-          ghcr.io/bigbio/quantms-rescoring:${{ steps.meta.outputs.version }}
-          ghcr.io/bigbio/quantms-rescoring:${{ steps.meta.outputs.major }}.${{ steps.meta.outputs.minor }}
+          ghcr.io/bigbio/quantms-rescoring:${{ steps.version.outputs.MAJOR }}.${{ steps.version.outputs.MINOR }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
         provenance: false
@@ -114,7 +110,7 @@ jobs:
         singularity push quantms-rescoring.sif oras://ghcr.io/bigbio/quantms-rescoring-sif:${{ steps.version.outputs.VERSION }}
         
         # Push with major.minor version tag
-        singularity push quantms-rescoring.sif oras://ghcr.io/bigbio/quantms-rescoring-sif:${{ steps.meta.outputs.major }}.${{ steps.meta.outputs.minor }}
+        singularity push quantms-rescoring.sif oras://ghcr.io/bigbio/quantms-rescoring-sif:${{ steps.version.outputs.MAJOR }}.${{ steps.version.outputs.MINOR }}
         
         # If this is a release event, also tag as latest
         if [[ "${{ env.IS_RELEASE }}" == "true" || "${{ github.event_name }}" == "release" ]]; then

@@ -3,7 +3,7 @@ name = "quantms-rescoring"
 description = "quantms-rescoring: Python scripts and helpers for the quantMS workflow"
 readme = "README.md"
 license = "MIT"
-version = "0.0.10"
+version = "0.0.11"
 authors = [
     "Yasset Perez-Riverol <ypriverol@gmail.com>",
     "Dai Chengxin <chengxin2024@126.com>",
@@ -41,6 +41,7 @@ scipy = "*"
 pygam = "*"
 protobuf= "*"
 ms2pip = ">=4.0"
+peptdeep = "*"
 
 [tool.poetry.urls]
 GitHub = "https://github.com/bigbio/quantms-rescoring"

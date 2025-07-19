@@ -619,3 +619,14 @@ class OpenMSHelper:
             if spec.getMSLevel() == ms_level:
                 spectra.append(spec)
         return spectra
+
+    @staticmethod
+    def get_instrument(exp: oms.MSExperiment):
+        instrument = exp.getInstrument().getName()
+        return instrument
+
+    @staticmethod
+    def get_nce_psm(psm_hit: PeptideIdentification, spec_lookup: oms.SpectrumLookup, exp: oms.MSExperiment):
+        spectrum = OpenMSHelper.get_spectrum_for_psm(psm_hit, exp, spec_lookup)
+        collision_energy = float(re.findall(r"@[a-zA-Z]+(\d+\.\d+)\s", spectrum.getMetaValue("filter string"))[0])
+        return collision_energy
