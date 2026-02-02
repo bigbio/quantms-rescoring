@@ -41,7 +41,7 @@ scipy = "*"
 pygam = "*"
 protobuf= "*"
 ms2pip = ">=4.0"
-peptdeep = "*"
+peptdeep = "1.4.1"
 psutil = "*"  # For memory-aware process count in HPC environments
 
 [tool.poetry.urls]
