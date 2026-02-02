@@ -1,6 +1,15 @@
 import pandas as pd
-from peptdeep.pretrained_models import ModelManager, model_mgr_settings, MODEL_DOWNLOAD_INSTRUCTIONS, \
+from peptdeep.pretrained_models import ModelManager, model_mgr_settings, \
     psm_sampling_with_important_mods, is_model_zip
+
+# Try to import MODEL_DOWNLOAD_INSTRUCTIONS from peptdeep (version-dependent export)
+try:
+    from peptdeep.pretrained_models import MODEL_DOWNLOAD_INSTRUCTIONS
+except ImportError:
+    MODEL_DOWNLOAD_INSTRUCTIONS = (
+        "Please download the pretrained models manually from "
+        "https://github.com/MannLabs/alphapeptdeep/releases and place them in the model directory."
+    )
 from peptdeep.model.ms2 import pDeepModel, frag_types, max_frag_charge, ModelMS2Bert, calc_ms2_similarity
 from peptdeep.model.rt import AlphaRTModel
 from peptdeep.model.ccs import AlphaCCSModel
@@ -57,11 +66,19 @@ if os.environ.get("QUANTMS_HPC_MODE", "").lower() in ("1", "true", "yes"):
 
 
 class MS2ModelManager(ModelManager):
+    """Extended ModelManager that uses MS2pDeepModel for MS2 predictions.
+
+    Note: This class intentionally does not call super().__init__() because it
+    replaces the ms2_model with MS2pDeepModel. Calling the parent would create
+    duplicate model instances.
+    """
+
     def __init__(self,
                  mask_modloss: bool = False,
                  device: str = "gpu",
                  model_dir: str = ".",
                  ):
+        # Initialize attributes expected by parent class methods
         self._train_psm_logging = True
 
         self.ms2_model: pDeepModel = MS2pDeepModel(
@@ -75,8 +92,9 @@ class MS2ModelManager(ModelManager):
         )
         self.model_url = "https://github.com/MannLabs/alphapeptdeep/releases/download/pre-trained-models/pretrained_models_v3.zip"
 
-        if len(glob.glob(os.path.join(model_dir, "*ms2.pth"))) > 0:
-            self.load_external_models(ms2_model_file=glob.glob(os.path.join(model_dir, "*ms2.pth"))[0])
+        ms2_model_files = glob.glob(os.path.join(model_dir, "*ms2.pth"))
+        if ms2_model_files:
+            self.load_external_models(ms2_model_file=ms2_model_files[0])
             self.model_str = model_dir
         else:
             self.download_model_path = os.path.join(model_dir, "pretrained_models_v3.zip")
@@ -116,7 +134,9 @@ class MS2ModelManager(ModelManager):
         else:
             logging.info(f"Downloading pretrained models from {url} to {model_zip_file_path} ...")
             try:
-                os.makedirs(os.path.dirname(model_zip_file_path), exist_ok=True)
+                parent_dir = os.path.dirname(model_zip_file_path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
                 context = ssl.create_default_context(cafile=certifi.where())
                 # Use streaming download with longer timeout for large model files
                 # timeout=300s (5 min) for slow connections; stream in 1MB chunks
@@ -136,9 +156,14 @@ class MS2ModelManager(ModelManager):
 
             logging.info("Successfully downloaded pretrained models.")
         if not is_model_zip(model_zip_file_path):
+            # Clean up invalid/corrupted file
+            try:
+                os.remove(model_zip_file_path)
+            except OSError:
+                pass
             raise ValueError(
                 f"Local model file is not a valid zip: {model_zip_file_path}.\n"
-                f"Please delete this file and try again.\n"
+                f"The invalid file has been removed. Please try again.\n"
                 f"Or: {MODEL_DOWNLOAD_INSTRUCTIONS}"
             )
 
@@ -184,6 +209,28 @@ class MS2ModelManager(ModelManager):
             download_model_path, model_path_in_zip="generic/charge.pth"
         )
 
+    def _build_intensity_df(self, matched_intensity_df: pd.DataFrame) -> pd.DataFrame:
+        """Build intensity DataFrame with all charged fragment types.
+
+        Parameters
+        ----------
+        matched_intensity_df : pd.DataFrame
+            The matched fragment intensities.
+
+        Returns
+        -------
+        pd.DataFrame
+            Intensity DataFrame with columns for all charged fragment types,
+            filled with 0.0 for missing columns.
+        """
+        inten_df = pd.DataFrame()
+        for frag_type in self.ms2_model.charged_frag_types:
+            if frag_type in matched_intensity_df.columns:
+                inten_df[frag_type] = matched_intensity_df[frag_type]
+            else:
+                inten_df[frag_type] = 0.0
+        return inten_df
+
     def train_ms2_model(
             self,
             psm_df: pd.DataFrame,
@@ -215,12 +262,7 @@ class MS2ModelManager(ModelManager):
             else:
                 tr_df = psm_df
             if len(tr_df) > 0:
-                tr_inten_df = pd.DataFrame()
-                for frag_type in self.ms2_model.charged_frag_types:
-                    if frag_type in matched_intensity_df.columns:
-                        tr_inten_df[frag_type] = matched_intensity_df[frag_type]
-                    else:
-                        tr_inten_df[frag_type] = 0.0
+                tr_inten_df = self._build_intensity_df(matched_intensity_df)
 
                 if self.use_grid_nce_search:
                     self.nce, self.instrument = self.ms2_model.grid_nce_search(
@@ -254,12 +296,7 @@ class MS2ModelManager(ModelManager):
                     test_psm_df = pd.DataFrame()
             else:
                 test_psm_df = psm_df.copy()
-                tr_inten_df = pd.DataFrame()
-                for frag_type in self.ms2_model.charged_frag_types:
-                    if frag_type in matched_intensity_df.columns:
-                        tr_inten_df[frag_type] = matched_intensity_df[frag_type]
-                    else:
-                        tr_inten_df[frag_type] = 0.0
+                tr_inten_df = self._build_intensity_df(matched_intensity_df)
             self.set_default_nce_instrument(test_psm_df)
         else:
             test_psm_df = pd.DataFrame()
@@ -369,7 +406,7 @@ class MS2pDeepModel(pDeepModel):
             self,
             batch_df: pd.DataFrame,
             predicts: np.ndarray,
-            **kwargs,
+            **_kwargs,
     ):
         apex_intens = predicts.reshape((len(batch_df), -1)).max(axis=1)
         apex_intens[apex_intens <= 0] = 1
