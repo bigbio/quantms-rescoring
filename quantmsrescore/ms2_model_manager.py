@@ -149,7 +149,7 @@ class MS2ModelManager(ModelManager):
                     try:
                         os.remove(model_zip_file_path)
                     except OSError:
-                        pass
+                        pass  # Best-effort cleanup; file may already be removed or locked
                 raise FileNotFoundError(
                     f"Downloading model failed: {e}.\n" + MODEL_DOWNLOAD_INSTRUCTIONS
                 ) from e
@@ -160,7 +160,7 @@ class MS2ModelManager(ModelManager):
             try:
                 os.remove(model_zip_file_path)
             except OSError:
-                pass
+                pass  # Best-effort cleanup; file may already be removed or locked
             raise ValueError(
                 f"Local model file is not a valid zip: {model_zip_file_path}.\n"
                 f"The invalid file has been removed. Please try again.\n"
