@@ -2,9 +2,9 @@
 
  on:
    push:
-     branches: [ "main" ]
+     branches: [ "dev" ]
    pull_request:
-     branches: [ "main" ]
+     branches: [ "dev" ]
      paths:
        - 'Dockerfile'
        - '.github/workflows/**'
@@ -78,8 +78,8 @@
          context: .
          push: ${{ (github.event.inputs.push_images == true || github.event.inputs.push_images == '') }}
          tags: |
-           ghcr.io/bigbio/quantms-rescoring:latest
-           ghcr.io/bigbio/quantms-rescoring:${{ steps.version.outputs.VERSION }}
+           ghcr.io/daichengxin/quantms-rescoring:latest
+           ghcr.io/daichengxin/quantms-rescoring:${{ steps.version.outputs.VERSION }}
          cache-from: type=gha
          cache-to: type=gha,mode=min
          build-args: |
@@ -90,7 +90,7 @@
 
      - name: Free up disk space after build
        run: |
-         docker image rm ghcr.io/bigbio/quantms-rescoring:latest || true
+         docker image rm ghcr.io/daichengxin/quantms-rescoring:latest || true
          docker system prune -af || true
          sudo apt-get clean
          sudo rm -rf /var/lib/apt/lists/*
@@ -107,7 +107,7 @@
      - name: Convert Docker image to Singularity
        if: ${{ (github.event.inputs.push_images == true || github.event.inputs.push_images == '') }}
        run: |
-         singularity build --disable-cache quantms-rescoring.sif docker://ghcr.io/bigbio/quantms-rescoring:latest
+         singularity build --disable-cache quantms-rescoring.sif docker://ghcr.io/daichengxin/quantms-rescoring:latest
          ls -la quantms-rescoring.sif
 
      - name: Login and Deploy Container
@@ -116,9 +116,9 @@
          IS_RELEASE: ${{ github.event_name == 'release' }}
        run: |
          echo ${{ secrets.GHCR_TOKEN }} | singularity remote login -u ${{ secrets.GHCR_USERNAME }} --password-stdin oras://ghcr.io
-         singularity push quantms-rescoring.sif oras://ghcr.io/bigbio/quantms-rescoring-sif:${{ steps.version.outputs.VERSION }}
+         singularity push quantms-rescoring.sif oras://ghcr.io/daichengxin/quantms-rescoring-sif:${{ steps.version.outputs.VERSION }}
          if [[ "${{ env.IS_RELEASE }}" == "true" || "${{ github.event_name }}" == "release" ]]; then
-           singularity push quantms-rescoring.sif oras://ghcr.io/bigbio/quantms-rescoring-sif:latest
+           singularity push quantms-rescoring.sif oras://ghcr.io/daichengxin/quantms-rescoring-sif:latest
          fi
 
      - name: Notify on success
