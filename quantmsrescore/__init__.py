@@ -226,6 +226,17 @@ def get_safe_process_count(requested: int, memory_per_process_gb: float = 4.0) -
 if os.environ.get("QUANTMS_HPC_MODE", "").lower() in ("1", "true", "yes"):
     configure_threading(n_threads=_DEFAULT_THREADS_PER_PROCESS, disable_gpu=True)
 
+# UID-less Container Fix (MUST run before importing torch/peptdeep/transformers)
+# PyTorch's torch._dynamo eagerly calls getpass.getuser() at import, which falls
+# back to pwd.getpwuid(os.getuid()). In containers with arbitrary UIDs (GitHub
+# Actions uid 1001, OpenShift random UIDs), there's no /etc/passwd entry, causing
+# KeyError. Setting USER env var prevents the fallback since getpass.getuser()
+# checks env vars ($LOGNAME, $USER, $LNAME, $USERNAME) first.
+# See: https://github.com/bigbio/quantms/issues/678
+os.environ.setdefault("USER", os.environ.get("LOGNAME", "quantms"))
+os.environ.setdefault("HOME", os.getcwd())
+os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR",
+                      os.path.join(os.getcwd(), ".torchinductor_cache"))
 
 # =============================================================================
 # Standard module initialization
@@ -235,7 +246,7 @@ from warnings import filterwarnings
 # Suppress warnings about OPENMS_DATA_PATH
 filterwarnings("ignore", message=".*OPENMS_DATA_PATH.*", category=UserWarning)
 
-__version__ = "0.0.14"
+__version__ = "0.0.15"
 
 __all__ = [
     "configure_threading",

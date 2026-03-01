@@ -60,8 +60,12 @@ COPY --from=builder /usr/local /usr/local
 ENV HOME=/app
 ENV PEPTDEEP_HOME=/app
 ENV MPLCONFIGDIR=/app/.config/matplotlib
+ENV USER=quantms
+ENV TORCHINDUCTOR_CACHE_DIR=/app/.torchinductor_cache
 
 WORKDIR /app
-RUN chmod -R 755 /app
+# Allow arbitrary UIDs to write to /app and /etc/passwd (OpenShift, GitHub Actions)
+RUN chmod -R 775 /app && \
+    chmod g+w /etc/passwd
 
 RUN python3.11 -c "import pyopenms; print('pyOpenMS imported successfully')"
