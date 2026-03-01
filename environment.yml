@@ -19,5 +19,6 @@ dependencies:
   - pytest
   - ms2pip>=4.0
   - psutil
+  - torch<2.10.0
   - pip:
     - peptdeep==1.4.1
