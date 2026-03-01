@@ -57,10 +57,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /usr/local /usr/local
 
-ENV HOME=/app
 ENV PEPTDEEP_HOME=/app
 ENV MPLCONFIGDIR=/app/.config/matplotlib
-ENV USER=quantms
 ENV TORCHINDUCTOR_CACHE_DIR=/app/.torchinductor_cache
 
 WORKDIR /app
