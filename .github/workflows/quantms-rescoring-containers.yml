@@ -57,7 +57,7 @@
        with:
          registry: ghcr.io
          username: ${{ github.actor }}
-         password: ${{ secrets.GHCR_TOKEN }}
+         password: ${{ secrets.GITHUB_TOKEN }}
 
      - name: Extract version from pyproject.toml
        id: version
@@ -115,7 +115,7 @@
        env:
          IS_RELEASE: ${{ github.event_name == 'release' }}
        run: |
-         echo ${{ secrets.GHCR_TOKEN }} | singularity remote login -u ${{ secrets.GHCR_USERNAME }} --password-stdin oras://ghcr.io
+         echo ${{ secrets.GITHUB_TOKEN }} | singularity remote login -u ${{ secrets.GITHUB_USERNAME }} --password-stdin oras://ghcr.io
          singularity push quantms-rescoring.sif oras://ghcr.io/daichengxin/quantms-rescoring-sif:${{ steps.version.outputs.VERSION }}
          if [[ "${{ env.IS_RELEASE }}" == "true" || "${{ github.event_name }}" == "release" ]]; then
            singularity push quantms-rescoring.sif oras://ghcr.io/daichengxin/quantms-rescoring-sif:latest
