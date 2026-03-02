@@ -226,7 +226,6 @@ def get_safe_process_count(requested: int, memory_per_process_gb: float = 4.0) -
 if os.environ.get("QUANTMS_HPC_MODE", "").lower() in ("1", "true", "yes"):
     configure_threading(n_threads=_DEFAULT_THREADS_PER_PROCESS, disable_gpu=True)
 
-
 # =============================================================================
 # Standard module initialization
 # =============================================================================
@@ -235,7 +234,7 @@ from warnings import filterwarnings
 # Suppress warnings about OPENMS_DATA_PATH
 filterwarnings("ignore", message=".*OPENMS_DATA_PATH.*", category=UserWarning)
 
-__version__ = "0.0.14"
+__version__ = "0.0.15"
 
 __all__ = [
     "configure_threading",
