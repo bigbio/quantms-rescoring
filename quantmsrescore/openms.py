@@ -13,7 +13,7 @@ filterwarnings(
 import numpy as np
 import pyopenms as oms
 from packaging import version
-from psm_utils import PSM
+from psm_utils import PSM, PSMList
 from pyopenms import (
     PeptideIdentification,
     ProteinIdentification,
@@ -174,7 +174,7 @@ def clear_spectrum_cache(mzml_file: Optional[Union[str, Path]] = None) -> None:
 
 
 def organize_psms_by_spectrum_id(
-    enumerated_psm_list: List[Any]
+    enumerated_psm_list:  Union[PSMList, List[Any]]
 ) -> Dict[str, List[Tuple[int, Any]]]:
     """
     Organize PSMs by spectrum ID for efficient lookup.
@@ -186,7 +186,7 @@ def organize_psms_by_spectrum_id(
     ----------
     enumerated_psm_list : List[Any]
         List of PSMs. Can be either:
-        - List[PSM]: Will be enumerated internally
+        - PSMList: Will be enumerated internally
         - List[Tuple[int, PSM]]: Already enumerated tuples
 
     Returns
@@ -203,7 +203,7 @@ def organize_psms_by_spectrum_id(
             psm_index, psm = item
         else:
             # Assume it's a PSM object, enumerate on the fly
-            psm_index = enumerated_psm_list.index(item)
+            psm_index = enumerated_psm_list.psm_list.index(item)
             psm = item
 
         psms_by_specid[str(psm.spectrum_id)].append((psm_index, psm))
