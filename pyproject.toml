@@ -14,7 +14,10 @@ keywords = [
     "proteomics",
     "mass-spectrometry",
     "data-analysis",
-    "big data"
+    "big data",
+    "psm-rescoring",
+    "ms2rescore",
+    "peptide-identification"
 ]
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -46,10 +49,11 @@ torch = "<2.10.0"
 psutil = "*"  # For memory-aware process count in HPC environments
 
 [tool.poetry.urls]
+Homepage = "https://quantms.org"
+Documentation = "https://docs.quantms.org"
 GitHub = "https://github.com/bigbio/quantms-rescoring"
-PyPi = "https://pypi.org/project/quantms-rescoring/"
-Quantms = "https://quantms.org"
-LICENSE = "https://github.com/bigbio/quantms-rescoring/blob/main/LICENSE"
+"Bug Tracker" = "https://github.com/bigbio/quantms-rescoring/issues"
+PyPI = "https://pypi.org/project/quantms-rescoring/"
 
 [tool.poetry.scripts]
 rescoring = "quantmsrescore.rescoring:main"
