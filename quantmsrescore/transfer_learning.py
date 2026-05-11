@@ -351,7 +351,7 @@ class AlphaPeptdeepTrainer:
 
                 # print(spectrum_id)
                 # Skip if no matching PSMs
-                psm = single_df[single_df["spectrum_ref"] == spectrum_id]
+                psm = single_df[single_df["spectrum_reference"] == spectrum_id]
                 if psm.shape[0] <= 0:
                     continue
                 # Process each PSM for this spectrum

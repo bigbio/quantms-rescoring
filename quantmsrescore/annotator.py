@@ -1,13 +1,15 @@
 import copy
 import gc
 from pathlib import Path
-from typing import Optional, Set, Union
-
+from typing import Optional, Set, Union, DefaultDict
+from collections import defaultdict
 from psm_utils import PSMList, PSM
-
+import pyarrow as pa
+import pyarrow.parquet as pq
 from quantmsrescore.deeplc import DeepLCAnnotator
 from quantmsrescore.exceptions import Ms2pipIncorrectModelException
 from quantmsrescore.idxmlreader import IdXMLRescoringReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.logging_config import get_logger
 from quantmsrescore.ms2pip import MS2PIPAnnotator
 from quantmsrescore.openms import OpenMSHelper, clear_spectrum_cache
@@ -150,6 +152,9 @@ class FeatureAnnotator:
 
         # Initialize state
         self._idxml_reader = None
+        self._idparquet_psm = None
+        self._idparquet_search_param = None
+
         self._deepLC = "deeplc" in feature_annotators
         if "ms2pip" in feature_annotators and ms2_tolerance_unit == "Da":
             self._ms2pip = True
@@ -239,6 +244,14 @@ class FeatureAnnotator:
             logger.error(f"Failed to load input files: {str(e)}")
             raise
 
+    def build_consensus_idparquet(self, parquet_files, spectrum_path):
+
+        self._idxml_reader = ParquetRescoringReader(parquet_files, spectrum_path)
+        self._higher_score_better = self._idxml_reader.high_score_better
+        logger.info(
+            f"Loaded {len(self._idxml_reader.psms)} PSMs from {parquet_files}"
+        )
+
     def annotate(self) -> None:
         """
         Annotate PSMs with MS2PIP and/or DeepLC features.
@@ -277,8 +290,8 @@ class FeatureAnnotator:
 
         # Convert features to OpenMS format if any annotations were added
         if self._ms2pip or self._alphapeptdeep or self._find_best_model or self._deepLC:
-            self._convert_features_psms_to_oms_peptides()
-
+            # self._convert_features_psms_to_oms_peptides()
+            self._convert_features_psms_to_idparquet()
         # Clear spectrum cache to free memory after annotation is complete
         clear_spectrum_cache()
         gc.collect()
@@ -309,6 +322,42 @@ class FeatureAnnotator:
             logger.info(f"Annotated idXML file written to {out_path}")
         except Exception as e:
             logger.error(f"Failed to write annotated idXML file: {str(e)}")
+            raise
+
+    def write_idparquet_file(self, filename: Union[str, Path]) -> None:
+        """
+        Write annotated data to idXML file.
+
+        Parameters
+        ----------
+        filename : Union[str, Path]
+            Path where the annotated idXML file will be written.
+
+        Raises
+        ------
+        Exception
+            If writing the file fails.
+        """
+        output_dir = Path(filename)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        psm_file = output_dir / "psms.parquet"
+        search_param_file = output_dir / "search_params.parquet"
+
+        try:
+            out_path = Path(filename)
+            pq.write_table(self._idparquet_psm, psm_file)
+            logger.info(f"psms.parquet file written to {out_path}")
+        except Exception as e:
+            logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+            raise
+
+        # search_params.parquet
+        try:
+            pq.write_table(self._idparquet_search_param, search_param_file)
+            logger.info(f"search_params.parquet written to {out_path}")
+        except Exception as e:
+            logger.error(f"Failed to write search_params.parquet file: {str(e)}")
             raise
 
     def _run_ms2pip_annotation(self) -> None:
@@ -761,6 +810,7 @@ class FeatureAnnotator:
                 if psm is None:
                     logger.warning(f"PSM not found for peptide {oms_peptide.getMetaValue('id')}")
                 else:
+                    print(psm)
                     # Add features to the OpenMS PSM
                     for feature, value in psm.rescoring_features.items():
                         canonical_feature = OpenMSHelper.get_canonical_feature(feature)
@@ -791,6 +841,72 @@ class FeatureAnnotator:
 
         # Update the peptides in the reader
         self._idxml_reader.oms_peptides = oms_peptides
+
+    def _convert_features_psms_to_idparquet(self) -> None:
+        """
+        Transfer features from PSM objects to idparquet objects.
+        """
+        records = []
+        psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idxml_reader.psms}
+        psms_df = self._idxml_reader.psms_df.drop(columns=["mods", "mod_sites"])
+        added_features: Set[str] = set()
+
+        for _, record in psms_df.iterrows():
+            record = record.to_dict()
+            psm_features = psm_dict.get(record["unique_hash"])
+            psm_metavalues = record["psm_metavalues"]
+            # ⭐ attach rescoring features
+            if hasattr(psm_features, "rescoring_features"):
+                for feature, value in psm_features.rescoring_features.items():
+                    if isinstance(value, int):
+                        value_type = "int"
+                    elif isinstance(value, float):
+                        value_type = "double"
+                    else:
+                        value_type = "string"
+
+                    canonical_feature = OpenMSHelper.get_canonical_feature(feature)
+                    if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
+                        canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
+
+                    if canonical_feature is not None:
+                        if (
+                                self._only_features
+                                and canonical_feature not in self._only_features
+                        ):
+                            continue
+                        added_features.add(canonical_feature)
+
+                    psm_metavalues.append({
+                        "name": canonical_feature,
+                        "value": str(value),
+                        "value_type": value_type
+                    })
+
+            record["psm_metavalues"] = psm_metavalues
+            record.pop("unique_hash", None)
+            records.append(record)
+
+        if self._idxml_reader.search_params["search_engine"] == "quantms-rescoring":
+            main_scores_features = {"MS:1002049,MS:1002053,MS:1002252,MS:1002257"}
+            all_features = main_scores_features.union(added_features)
+        else:
+            # Update search parameters with added features
+            try:
+                features_existing = self._idxml_reader.search_params["extra_features"]
+                if features_existing:
+                    existing_set = set(features_existing.split(","))
+                else:
+                    existing_set = set()
+            except (KeyError, AttributeError, RuntimeError) as e:
+                logger.debug(f"No existing extra_features found: {e}")
+                existing_set = set()
+
+            # Combine existing and new features
+            all_features = existing_set.union(added_features)
+        self._idxml_reader.search_params["extra_features"] = ",".join(sorted(all_features))
+        self._idparquet_psm = pa.Table.from_pylist(records)
+        self._idparquet_search_param = pa.Table.from_pylist([self._idxml_reader.search_params])
 
     def _update_search_parameters(self, features: Set[str]) -> None:
         """

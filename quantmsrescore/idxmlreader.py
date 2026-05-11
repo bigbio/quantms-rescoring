@@ -160,6 +160,7 @@ class IdXMLRescoringReader(IdXMLReader):
             peptide_id: oms.PeptideIdentification,
             peptide_hit: oms.PeptideHit,
             is_decoy: bool = False,
+            search_engine_name: str = None
     ) -> Optional[PSM]:
         """
         Parse a peptide-spectrum match (PSM) from given protein and peptide models.
@@ -203,6 +204,7 @@ class IdXMLRescoringReader(IdXMLReader):
                 retention_time=rt,
                 rank=peptide_hit.getRank() + 1,  # Ranks in idXML start at 0
                 source="idXML",
+                metadata={"search_engine_name": search_engine_name},
                 provenance_data={provenance_key: ""},  # We use only the key for provenance
             )
         except Exception as e:
@@ -241,6 +243,8 @@ class IdXMLRescoringReader(IdXMLReader):
             mods_name_dict[m.decode('utf-8').split(" ")[0]] = " ".join(m.decode('utf-8').split(" ")[1:]).replace("(", "").replace(")", "")
 
         instrument = OpenMSHelper.get_instrument(self.exp)
+        search_engine_name = self.oms_proteins[0].getSearchEngine()
+
         if only_ms2 and self.spec_lookup is None:
             logger.warning("Spectrum lookup not initialized, cannot filter for MS2 spectra")
             only_ms2 = False
@@ -279,6 +283,7 @@ class IdXMLRescoringReader(IdXMLReader):
                     peptide_id=peptide_id,
                     peptide_hit=psm_hit,
                     is_decoy=OpenMSHelper.is_decoy_peptide_hit(psm_hit),
+                    search_engine_name=search_engine_name
                 )
 
                 sequence = psm_hit.getSequence().toUnmodifiedString()
@@ -296,11 +301,12 @@ class IdXMLRescoringReader(IdXMLReader):
                         "nce": nce,
                         "provenance_data": next(iter(psm.provenance_data.keys())),
                         "instrument": instrument,
-                        "spectrum_ref": spectrum_ref,
+                        "spectrum_reference": spectrum_ref,
                         "filename": Path(filename).stem if filename else None,
                         "is_decoy": OpenMSHelper.is_decoy_peptide_hit(psm_hit),
                         "rank": psm_hit.getRank() + 1,
                         "score": psm_hit.getScore(),
+                        "search_engines": search_engine_name
                     })
 
         self._psms = PSMList(psm_list=psm_list)
