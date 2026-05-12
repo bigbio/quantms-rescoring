@@ -1,227 +1,213 @@
 import re
-from dataclasses import dataclass
-
 import click
 import numpy as np
+import pandas as pd
 from scipy.stats import entropy
 
-from quantmsrescore.idxmlreader import IdXMLReader
 from quantmsrescore.logging_config import get_logger, configure_logging
 from quantmsrescore.openms import OpenMSHelper
+from quantmsrescore.utils import ParquetReader
 
-# Configure logging with default settings
+# init logging
 configure_logging()
-
-# Get logger for this module
 logger = get_logger(__name__)
 
 
-@dataclass
+# =========================
+# Spectrum feature container
+# =========================
 class SpectrumMetrics:
-    """Data class to hold spectrum analysis metrics"""
+    """
+    Store computed spectrum-level features for one MS/MS spectrum.
+    """
 
-    snr: float
-    spectral_entropy: float
-    fraction_tic_top_10: float
-    weighted_std_mz: float
+    def __init__(self, snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz):
+        self.snr = snr
+        self.spectral_entropy = spectral_entropy
+        self.fraction_tic_top_10 = fraction_tic_top_10
+        self.weighted_std_mz = weighted_std_mz
 
-    def as_dict(self) -> dict:
-        """Convert metrics to a dictionary with proper prefixes"""
-
+    def as_dict(self):
+        """
+        Convert metrics into OpenMS MetaValue format.
+        """
         return {
             "Quantms:Snr": OpenMSHelper.get_str_metavalue_round(self.snr),
             "Quantms:SpectralEntropy": OpenMSHelper.get_str_metavalue_round(self.spectral_entropy),
             "Quantms:FracTICinTop10Peaks": OpenMSHelper.get_str_metavalue_round(
                 self.fraction_tic_top_10
             ),
-            "Quantms:WeightedStdMz": OpenMSHelper.get_str_metavalue_round(self.weighted_std_mz),
+            "Quantms:WeightedStdMz": OpenMSHelper.get_str_metavalue_round(
+                self.weighted_std_mz
+            ),
         }
 
 
+# =========================
+# Spectrum analysis logic
+# =========================
 class SpectrumAnalyzer:
-    """Class to handle spectrum analysis operations"""
 
     @staticmethod
     def compute_signal_to_noise(intensities: np.ndarray) -> float:
         """
-        Compute the signal-to-noise ratio for a given array of intensities.
-
-        Parameters
-        ----------
-        intensities : np.ndarray
-            Array of intensity values.
-
-        Returns
-        -------
-        float
-            The signal-to-noise ratio calculated as the maximum intensity
-            divided by the root mean square deviation of the intensities.
-
-        Raises
-        ------
-        ValueError
-            If the input intensity array is empty.
+        Signal-to-noise ratio = max intensity / RMSD
         """
         if len(intensities) == 0:
-            raise ValueError("Empty intensity array provided")
+            return 0.0
 
-        rmsd = np.sqrt(np.mean(np.square(intensities)))
-        if rmsd == 0:
-            return 0
-
-        return np.max(intensities) / rmsd
+        rmsd = np.sqrt(np.mean(intensities ** 2))
+        return 0.0 if rmsd == 0 else np.max(intensities) / rmsd
 
     @staticmethod
-    def compute_spectrum_metrics(
-        mz_array: np.ndarray, intensity_array: np.ndarray
-    ) -> SpectrumMetrics:
+    def compute_spectrum_metrics(mz_array, intensity_array) -> SpectrumMetrics:
         """
-        Compute various spectrum metrics including signal-to-noise ratio,
-        spectral entropy, fraction of total ion current in the top 10 peaks,
-        and weighted standard deviation of m/z values.
-
-        Parameters
-        ----------
-            mz_array (np.ndarray): Array of m/z values.
-            intensity_array (np.ndarray): Array of intensity values.
-
-        Returns
-        -------
-            SpectrumMetrics: An instance containing computed spectrum metrics.
-
-        Raises
-        ------
-            ValueError: If input arrays are empty, have different lengths, or
-                        if the total ion current is zero.
+        Compute full spectrum-level descriptors.
         """
-        if len(intensity_array) == 0 or len(mz_array) == 0:
-            raise ValueError("Empty arrays provided")
+
+        if len(mz_array) == 0 or len(intensity_array) == 0:
+            raise ValueError("Empty spectrum")
 
         if len(mz_array) != len(intensity_array):
-            raise ValueError("mz_array and intensity_array must have same length")
+            raise ValueError("mz/intensity mismatch")
 
-        # Total Ion Current
         tic = np.sum(intensity_array)
         if tic == 0:
-            raise ValueError("Total ion current is zero")
+            raise ValueError("TIC = 0")
 
-        # Normalized intensities
-        normalized_intensities = intensity_array / tic
+        # normalize intensity
+        norm = intensity_array / tic
 
-        # Calculate all metrics
+        # 1. SNR
         snr = SpectrumAnalyzer.compute_signal_to_noise(intensity_array)
-        spectral_entropy = entropy(normalized_intensities)
 
-        # Top 10 peaks analysis
-        top_n_peaks = np.sort(intensity_array)[-10:]
-        fraction_tic_top_10 = np.sum(top_n_peaks) / tic
+        # 2. entropy
+        spectral_entropy = entropy(norm)
 
-        # Weighted m/z calculations
-        weighted_mean_mz = np.sum(mz_array * normalized_intensities)
-        weighted_std_mz = np.sqrt(
-            np.sum(normalized_intensities * (mz_array - weighted_mean_mz) ** 2)
-        )
+        # 3. top-10 TIC fraction
+        top10 = np.sort(intensity_array)[-10:]
+        frac_top10 = np.sum(top10) / tic
 
-        return SpectrumMetrics(snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz)
+        # 4. weighted m/z variance
+        wmz = np.sum(mz_array * norm)
+        wstd = np.sqrt(np.sum(norm * (mz_array - wmz) ** 2))
+
+        return SpectrumMetrics(snr, spectral_entropy, frac_top10, wstd)
 
 
+# =========================
+# CLI entry
+# =========================
 @click.command("spectrum2feature")
+@click.option(
+    "--parquet",
+    type=click.Path(exists=True),
+    required=True,
+    help="Input parquet directory containing PSMs",
+)
 @click.option(
     "--mzml",
     type=click.Path(exists=True),
     required=True,
-    help="Path to the mass spectrometry file",
-)
-@click.option(
-    "--idxml",
-    type=click.Path(exists=True),
-    required=True,
-    help="Path to the idXML file with PSMs corresponding to the mzML file",
+    help="mzML file with spectra",
 )
 @click.option(
     "--output",
     type=click.Path(),
     required=True,
-    help="Path for the output idXML file with computed metrics",
+    help="Output parquet file",
 )
-@click.pass_context
-def spectrum2feature(ctx, mzml: str, idxml: str, output: str) -> None:
-    """
-    Command-line tool to compute spectrum metrics and update idXML files.
+def spectrum2feature(parquet, mzml, output):
 
-    This command processes an mzML file and an idXML file containing PSMs,
-    computes spectrum metrics for each peptide identification, and updates
-    the idXML file with these metrics.
+    logger.info(f"[START] spectrum2feature")
+    logger.info(f"Input parquet: {parquet}")
+    logger.info(f"mzML file: {mzml}")
 
-    Parameters
-    ----------
-    ctx : click.Context
-        The Click context object.
-    mzml : str
-        Path to the mzML file containing mass spectrometry deeplc_models.
-    idxml : str
-        Path to the idXML file with PSMs corresponding to the mzML file.
-    output : str
-        Path for the output idXML file with computed metrics.
+    # =========================
+    # 1. Load Parquet pipeline
+    # =========================
+    reader = ParquetReader(parquet)
 
-    Raises
-    ------
-    ValueError
-        If no protein identifications are found in the idXML file.
-    """
-    logger.info(f"Processing mzML file: {mzml}")
+    # build spectrum lookup index (OpenMS wrapper)
+    reader.build_spectrum_lookup(mzml)
 
-    idxml_reader = IdXMLReader(idxml_filename=idxml)
-    idxml_reader.build_spectrum_lookup(mzml, check_unix_compatibility=True)
-    protein_ids = idxml_reader.oms_proteins
-    peptide_ids = idxml_reader.oms_peptides
+    # load PSM table
+    psms_df = reader._load_parquet(reader.filename / "psms.parquet")
 
-    if not protein_ids:
-        raise ValueError("No protein identifications found in idXML file")
+    if psms_df.empty:
+        logger.error("No PSMs found in parquet")
+        raise ValueError("Empty PSM table")
 
-    result_peptides = []
-    for peptide in peptide_ids:
-        spectrum_reference = peptide.getMetaValue("spectrum_reference")
-        scan_matches = re.findall(r"(spectrum|scan)=(\d+)", spectrum_reference)
+    logger.info(f"Loaded {len(psms_df)} PSMs")
 
-        if not scan_matches:
-            logger.warning(f"Could not parse scan number from reference: {spectrum_reference}")
+    result_rows = []
+
+    # =========================
+    # 2. iterate PSMs
+    # =========================
+    for idx, row in psms_df.iterrows():
+
+        spectrum_reference = row.get("spectrum_reference", None)
+
+        if spectrum_reference is None:
+            logger.warning(f"Missing spectrum_reference at row {idx}")
             continue
 
-        scan_number = int(scan_matches[0][1])
-        spectrum_data = OpenMSHelper.get_peaks_by_scan(scan_number, idxml_reader.exp, idxml_reader.spec_lookup)
+        # parse scan id
+        scan_match = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
+
+        if not scan_match:
+            logger.warning(f"Cannot parse scan: {spectrum_reference}")
+            continue
+
+        scan = int(scan_match[0][1])
+
+        # =========================
+        # 3. fetch spectrum
+        # =========================
+        spectrum_data = OpenMSHelper.get_peaks_by_scan(
+            scan,
+            reader.exp,
+            reader.spec_lookup,
+        )
 
         if spectrum_data is None:
+            logger.debug(f"No spectrum found for scan {scan}")
             continue
 
+        mz_array, intensity_array = spectrum_data
+
+        # =========================
+        # 4. compute features
+        # =========================
         try:
-            mz_array, intensity_array = spectrum_data
             metrics = SpectrumAnalyzer.compute_spectrum_metrics(
-                np.array(mz_array), np.array(intensity_array)
+                np.array(mz_array),
+                np.array(intensity_array),
             )
 
-            # Update peptide hits with metrics
-            for hit in peptide.getHits():
-                for key, value in metrics.as_dict().items():
-                    hit.setMetaValue(key, value)
-                peptide.setHits([hit])
+            record = row.to_dict()
+            record.update(metrics.as_dict())
 
-            result_peptides.append(peptide)
+            result_rows.append(record)
 
-        except ValueError as e:
-            logger.error(f"Error processing scan {scan_number}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed spectrum {scan}: {e}")
             continue
 
-    # Update search parameters with new features
-    search_parameters = protein_ids[0].getSearchParameters()
-    existing_features = search_parameters.getMetaValue("extra_features")
-    new_features = ",".join(metrics.as_dict().keys())
-    extra_features = f"{existing_features},{new_features}" if existing_features else new_features
-    search_parameters.setMetaValue("extra_features", extra_features)
-    protein_ids[0].setSearchParameters(search_parameters)
+    # =========================
+    # 5. output
+    # =========================
+    result_df = pd.DataFrame(result_rows)
 
-    # Save results
-    OpenMSHelper.write_idxml_file(
-        filename=output, protein_ids=protein_ids, peptide_ids=result_peptides
+    logger.info(f"Final valid spectra: {len(result_df)}")
+
+    # save parquet
+    out_file = (
+        output if output.endswith(".parquet")
+        else f"{output}/psms.parquet"
     )
-    logger.info(f"Results saved to: {output}")
+
+    result_df.to_parquet(out_file, index=False)
+
+    logger.info(f"[DONE] saved to {out_file}")

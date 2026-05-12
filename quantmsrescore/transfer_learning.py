@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Import thread configuration FIRST before other heavy imports
 from quantmsrescore import configure_threading, configure_torch_threads
-from quantmsrescore.idxmlreader import IdXMLRescoringReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.logging_config import get_logger
 from quantmsrescore.openms import OpenMSHelper, get_compiled_regex
 from quantmsrescore.alphapeptdeep import read_spectrum_file, _get_targets_df_for_psm
@@ -25,8 +25,8 @@ logger = get_logger(__name__)
 )
 @click.option(
     "-i",
-    "--idxml",
-    help="Path to the idxml containing the PSMs from OpenMS",
+    "--idparquet",
+    help="Path to input parquet file or directory",
     required=True,
     type=click.Path(exists=True),
 )
@@ -101,7 +101,7 @@ logger = get_logger(__name__)
 @click.pass_context
 def transfer_learning(
         ctx,
-        idxml: str,
+        idparquet: str,
         mzml,
         save_model_dir: str,
         processes,
@@ -129,8 +129,8 @@ def transfer_learning(
 
     ctx : click.Context
         The Click context object.
-    idxml : str
-        Path to the idXML file containing the PSMs.
+    idparquet : str
+        Path to the idparquet file containing the PSMs.
     mzml : str
         Path to the mzML file containing the mass spectrometry deeplc_models.
     save_model_dir : str
@@ -184,7 +184,7 @@ def transfer_learning(
         save_model_dir=save_model_dir,
         log_level=log_level.upper()
     )
-    annotator.build_idxml_data(idxml, mzml)
+    annotator.build_parquet_data(idparquet, mzml)
     annotator.fine_tune()
 
 
@@ -200,7 +200,7 @@ class AlphaPeptdeepTrainer:
                  epoch_to_train_ms2: int = 20,
                  force_transfer_learning: bool = False,
                  log_level: str = "INFO"):
-        self._idxml_reader = None
+        self._idparquet_reader: ParquetRescoringReader = None
         self._higher_score_better = None
         self.spec_file = None
         self.psms_df = []
@@ -221,98 +221,46 @@ class AlphaPeptdeepTrainer:
 
         configure_logging(log_level)
 
-    def _read_idxml_file(self, idxml_path, spectrum_paths):
-        # Load the idXML file and corresponding mzML file
-        prot_ids = []
-        pep_ids = []
-        oms.IdXMLFile().load(str(idxml_path), prot_ids, pep_ids)
-        # Validate prot_ids and spectra_data
-        if not prot_ids:
-            logger.error(f"No protein identifications found in idXML: {idxml_path}")
-            raise ValueError("No protein identifications found in idXML file.")
-        if not prot_ids[0].metaValueExists("spectra_data"):
-            logger.error(f'"spectra_data" meta value missing in first protein identification for idXML: {idxml_path}')
-            raise ValueError('"spectra_data" meta value missing in first protein identification.')
-        spectra_data_value = prot_ids[0].getMetaValue("spectra_data")
-        if not spectra_data_value or len(spectra_data_value) == 0:
-            logger.error(f'"spectra_data" meta value is empty in first protein identification for idXML: {idxml_path}')
-            raise ValueError('"spectra_data" meta value is empty in first protein identification.')
-        spectra_data = spectra_data_value[0].decode("utf-8")
-        spectrum_path = None
-        for mzml_file in spectrum_paths:
-            if Path(spectra_data).stem == mzml_file.stem:
-                spectrum_path = mzml_file
-                break
+    @staticmethod
+    def _read_idparquet_file(parquet_dir, spectrum_paths):
+        # Load the idparquet file and corresponding mzML file
+        reader = ParquetRescoringReader(parquet_dir, spectrum_paths)
+        return reader.psms_df
 
-        if spectrum_path is None:
-            logger.error(
-                "Missing mzML for idXML: {}".format(idxml_path)
-            )
-            raise ValueError("Missing mzML for idXML")
+    def build_parquet_data(self, idparquet_dir, mzml_path):
 
-        self._idxml_reader = IdXMLRescoringReader(
-            idxml_filename=idxml_path,
-            mzml_file=spectrum_path,
-            only_ms2=True,
-            remove_missing_spectrum=True,
-        )
-        if (2, 'HCD') not in self._idxml_reader._stats.ms_level_dissociation_method:
-            logger.error(
-                "Found not HCD dissociation methods"
-                "AlphaPeptdeep pretrained models are not trained for not HCD dissociation methods"
-            )
-            raise ValueError("HCD dissociation method required")
-        return self._idxml_reader.psms_df
+        logger.info(f"Loading Parquet data: {idparquet_dir}")
 
-    def build_idxml_data(self, idxml_file, spectrum_path):
-        logger.info(f"Loading data from: {idxml_file}")
+        idparquet_dir = Path(idparquet_dir)
+        mzml_path = Path(mzml_path)
 
-        try:
-            # Convert paths to Path objects for consistency
-            idxml_path = Path(idxml_file)
-            spectrum_path = Path(spectrum_path)
-            if idxml_path.is_dir():
-                idxml_files = sorted([f for f in idxml_path.iterdir() if f.suffix.lower() == ".idxml"])
-                mzml_files = sorted([f for f in spectrum_path.iterdir() if f.suffix.lower() == ".mzml"])
+        if idparquet_dir.is_dir():
+            parquet_dirs = sorted([p for p in idparquet_dir.iterdir() if p.is_dir()])
+            mzml_files = sorted([f for f in mzml_path.iterdir() if f.suffix == ".mzML"])
+        else:
+            parquet_dirs = [idparquet_dir]
+            mzml_files = [mzml_path]
 
-                with ProcessPoolExecutor(max_workers=self._processes) as executor:
-                    future_to_file = {executor.submit(self._read_idxml_file, idxml_file, mzml_files): idxml_file for
-                                      idxml_file in idxml_files}
-                    for future in as_completed(future_to_file):
-                        try:
-                            content = future.result()
-                            self.psms_df.append(content)
-                        except Exception as e:
-                            idxml_file = future_to_file[future]
-                            logger.error(f"Error processing file: {idxml_file, e}")
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            raise
+        self.spec_files = mzml_files
 
-                self.psms_df = pd.concat(self.psms_df, ignore_index=True)
-                decoys = len(self.psms_df[self.psms_df["is_decoy"]])
-                targets = len(self.psms_df) - decoys
-                self.spec_file = mzml_files
-            else:
-                # Load the idXML file and corresponding mzML file
-                self._idxml_reader = IdXMLRescoringReader(
-                    idxml_filename=idxml_path,
-                    mzml_file=spectrum_path,
-                    only_ms2=True,
-                    remove_missing_spectrum=True,
-                )
-                self._higher_score_better = self._idxml_reader.high_score_better
-                self.psms_df = self._idxml_reader.psms_df
-                self.spec_file = [spectrum_path]
-                openms_helper = OpenMSHelper()
-                decoys, targets = openms_helper.count_decoys_targets(self._idxml_reader.oms_peptides)
+        all_dfs = []
 
-            logger.info(
-                f"Loaded {len(self.psms_df)} PSMs from {idxml_path.name}: {decoys} decoys and {targets} targets"
-            )
+        with ProcessPoolExecutor(max_workers=self._processes) as executor:
+            futures = {
+                executor.submit(self._read_idparquet_file, d, mzml_files): d
+                for d in parquet_dirs
+            }
 
-        except Exception as e:
-            logger.error(f"Failed to load input files: {str(e)}")
-            raise
+            for f in as_completed(futures):
+                try:
+                    all_dfs.append(f.result())
+                except Exception as e:
+                    logger.error(f"Failed: {futures[f]} -> {e}")
+                    raise
+
+        self.psms_df = pd.concat(all_dfs, ignore_index=True)
+
+        logger.info(f"Loaded {len(self.psms_df)} PSMs")
 
     def fine_tune(self):
         if self._consider_modloss:

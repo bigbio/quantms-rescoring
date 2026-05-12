@@ -12,67 +12,113 @@ filterwarnings(
     module="pyopenms",
 )
 
-
-
 import click
 
 from quantmsrescore.logging_config import configure_logging
-from quantmsrescore.utils import IdXMLReader
+from quantmsrescore.idparquet_reader import ParquetReader
 
-# Configure logging with default settings
+# logging（必须保留）
 configure_logging()
 
 
 @click.command(
     "psm_feature_clean",
-    short_help="Annotate PSMs in an idXML file using ms2rescore features.",
+    short_help="Clean PSMs in parquet using spectrum-based filtering.",
 )
 @click.option(
     "-i",
-    "--idxml",
-    help="Path to the idxml containing the PSMs from OpenMS",
+    "--idparquet",
+    help="Path to parquet directory containing PSMs",
     required=True,
     type=click.Path(exists=True),
 )
 @click.option(
     "-s",
     "--mzml",
-    help="Path to the mzML file containing the spectra use for identification",
+    help="Path to mzML file",
     required=True,
     type=click.Path(exists=True),
 )
 @click.option(
     "-o",
     "--output",
-    help="Path the output idxml for the processed PSMs",
+    help="Output parquet file",
+    required=True,
+    type=click.Path(),
 )
-@click.pass_context
 def psm_feature_clean(
-    ctx,
-    idxml: str,
+    idparquet: str,
     mzml: str,
     output: str,
 ):
     """
-    Annotate PSMs in an idXML file with additional features using specified models.
+    Clean PSMs from parquet input using:
+    - spectrum existence check
+    - MS2 filtering
+    - invalid score removal
+    - duplicate removal
 
-    This command-line interface (CLI) command processes a PSM file by remove invalid PSMs
-
-    Parameters
-    ----------
-
-    ctx : click.Context
-        The Click context object.
-    idxml : str
-        Path to the idXML file containing the PSMs.
-    mzml : str
-        Path to the mzML file containing the mass spectrometry.
-    output : str
-        Path to the output idXML file with processed PSMs.
+    Also rebuild:
+    - protein table
+    - protein group table
     """
 
-    id_reader = IdXMLReader(idxml)
-    id_reader.build_spectrum_lookup(mzml, check_unix_compatibility=True)
-    id_reader.psm_clean()
-    id_reader.write_idxml_file(output)
+    logger.info("[START] PSM feature clean (parquet mode)")
+    logger.info(f"Input: {idparquet}")
+    logger.info(f"mzML: {mzml}")
 
+    # =========================
+    # 1. Load parquet reader
+    # =========================
+    reader = ParquetReader(idparquet)
+
+    reader.build_spectrum_lookup(
+        mzml,
+        check_unix_compatibility=True
+    )
+
+    # =========================
+    # 2. Load PSM table
+    # =========================
+    psms_file = reader.filename / "psms.parquet"
+
+    reader._psms_df = reader._load_parquet(psms_file)
+
+    if reader._psms_df.empty:
+        logger.error("Empty PSM table")
+        raise ValueError("No PSMs found")
+
+    logger.info(f"Loaded PSMs: {len(reader._psms_df)}")
+
+    # =========================
+    # 3. Clean PSMs
+    # =========================
+    stats = reader.psm_clean(
+        remove_missing_spectrum=True,
+        only_ms2=True
+    )
+
+    # =========================
+    # 4. Logging stats
+    # =========================
+    logger.info(
+        f"Clean summary: "
+        f"missing={stats.missing_spectra}, "
+        f"empty={stats.empty_spectra}, "
+        f"invalid={stats.invalid_score}, "
+        f"duplicates={stats.duplicates_psm}"
+    )
+
+    logger.info(f"MS levels: {dict(stats.ms_level_counts)}")
+
+    # =========================
+    # 5. Save parquet output
+    # =========================
+    out_path = (
+        output if output.endswith(".parquet")
+        else f"{output}/psm_clean.parquet"
+    )
+
+    reader._psms_df.to_parquet(out_path, index=False)
+
+    logger.info(f"[DONE] saved: {out_path}")
