@@ -7,7 +7,10 @@ from quantmsrescore.exceptions import MS3NotSupportedException
 import pyopenms as oms
 import pandas as pd
 import pyarrow.parquet as pq
+import pyarrow as pa
 from quantmsrescore.openms import OpenMSHelper
+from datetime import datetime, timezone
+import uuid
 
 logger = get_logger(__name__)
 
@@ -38,7 +41,7 @@ class ParquetReader:
         List of peptide identifications parsed from the idXML file.
     """
 
-    def __init__(self, idparquet: Union[Path, str]) -> None:
+    def __init__(self, idparquet: Union[str, Path, List[Union[str, Path]]]) -> None:
         """
         Initialize IdXMLReader with the specified idXML file.
 
@@ -47,13 +50,393 @@ class ParquetReader:
         idxml_filename : Union[Path, str]
             Path to the idXML file to be read and parsed.
         """
-        self.filename = Path(idparquet)
+
+        if isinstance(idparquet, (str, Path)):
+            self.parquet_dirs = [Path(idparquet)]
+        else:
+            self.parquet_dirs = [Path(p) for p in idparquet]
+
+        for p in self.parquet_dirs:
+            if not p.exists():
+                raise FileNotFoundError(f"{p} does not exist")
+
         self.spec_lookup = None
         self.exp = None
+        self.psm_schema = None
+        self.search_params_schema = None
+        self.proteins_schema = None
+        self.protein_groups_schema = None
 
         # Private properties for spectrum lookup
         self._mzml_path = None
         self._stats = None  # IdXML stats
+        self.creation_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.meta_struct = pa.struct([
+            pa.field("name", pa.string()),
+            pa.field("value", pa.string()),
+            pa.field("value_type", pa.string()),
+        ])
+        self._init_psm_schema()
+        self._init_search_params_schema()
+        self._init_proteins_schema()
+        self._init_protein_groups_schema()
+
+    def _init_psm_schema(self):
+        # =========================================================
+        # modification struct
+        # =========================================================
+
+        modification_struct = pa.struct([
+            ("name", pa.string()),
+            ("accession", pa.string()),
+            ("positions", pa.list_(pa.struct([
+                ("position", pa.string()),
+                ("scores", pa.float64()),
+            ]))),
+        ])
+
+        # =========================================================
+        # additional score struct
+        # =========================================================
+
+        additional_score_struct = pa.struct([
+            ("score_name", pa.string()),
+            ("score_value", pa.float64()),
+            ("higher_better", pa.bool_()),
+        ])
+
+        # =========================================================
+        # protein accession struct
+        # =========================================================
+
+        protein_accession_struct = pa.struct([
+            pa.field(
+                "accession",
+                pa.string(),
+                nullable=False
+            ),
+            pa.field(
+                "aa_before",
+                pa.string()
+            ),
+            pa.field(
+                "aa_after",
+                pa.string()
+            ),
+            pa.field(
+                "start",
+                pa.int32()
+            ),
+            pa.field(
+                "end",
+                pa.int32()
+            ),
+        ])
+
+        # =========================================================
+        # PSM schema
+        # =========================================================
+
+        self.psm_schema = pa.schema([
+            pa.field("sequence", pa.string()),
+            pa.field("peptidoform", pa.string()),
+            pa.field(
+                "modifications",
+                pa.list_(modification_struct)
+            ),
+            pa.field(
+                "precursor_charge",
+                pa.int32()
+            ),
+            pa.field(
+                "posterior_error_probability",
+                pa.float64()
+            ),
+            pa.field(
+                "is_decoy",
+                pa.bool_()
+            ),
+            pa.field(
+                "calculated_mz",
+                pa.float64()
+            ),
+            pa.field(
+                "observed_mz",
+                pa.float64()
+            ),
+            pa.field(
+                "additional_scores",
+                pa.list_(additional_score_struct)
+            ),
+            pa.field(
+                "protein_accessions",
+                pa.list_(protein_accession_struct)
+            ),
+            pa.field(
+                "predicted_rt",
+                pa.float64()
+            ),
+            pa.field(
+                "reference_file_name",
+                pa.string()
+            ),
+            pa.field(
+                "cv_params",
+                pa.string()
+            ),
+            pa.field(
+                "scan",
+                pa.int32()
+            ),
+            pa.field(
+                "rt",
+                pa.float64()
+            ),
+            pa.field(
+                "ion_mobility",
+                pa.float64()
+            ),
+            pa.field(
+                "spectrum_reference",
+                pa.string()
+            ),
+            pa.field(
+                "score",
+                pa.float64()
+            ),
+            pa.field(
+                "score_type",
+                pa.string()
+            ),
+            pa.field(
+                "higher_score_better",
+                pa.bool_()
+            ),
+            pa.field(
+                "hit_index",
+                pa.int32()
+            ),
+            pa.field(
+                "peptide_identification_index",
+                pa.int32()
+            ),
+            pa.field(
+                "psm_metavalues",
+                pa.list_(self.meta_struct)
+            ),
+            pa.field(
+                "spectrum_metavalues",
+                pa.list_(self.meta_struct)
+            ),
+            pa.field(
+                "run_identifier",
+                pa.string()
+            ),
+            pa.field(
+                "mz_array",
+                pa.list_(pa.float32())
+            ),
+            pa.field(
+                "intensity_array",
+                pa.list_(pa.float32())
+            ),
+            pa.field(
+                "charge_array",
+                pa.list_(pa.int32())
+            ),
+            pa.field(
+                "ion_type_array",
+                pa.list_(pa.string())
+            ),
+
+        ], metadata={
+            b"software_provider": b"OpenMS",
+            b"creation_date": self.creation_date.encode(),
+            b"uuid": str(uuid.uuid4()).encode(),
+            b"file_type": b"psms",
+            b"creator": b"OpenMS",
+            b"qpx_version": b"1.0",
+        })
+
+    def _init_search_params_schema(self):
+        self.search_params_schema = pa.schema([
+            pa.field("run_identifier", pa.string(), nullable=False),
+            pa.field("search_engine", pa.string(), nullable=False),
+            pa.field("search_engine_version", pa.string()),
+            pa.field("inference_engine", pa.string()),
+            pa.field("inference_engine_version", pa.string()),
+            pa.field("date", pa.timestamp("ms")),
+            pa.field("score_type", pa.string(), nullable=False),
+            pa.field("higher_score_better", pa.bool_(), nullable=False),
+            pa.field("significance_threshold", pa.float64()),
+            pa.field("db", pa.string()),
+            pa.field("db_version", pa.string()),
+            pa.field("taxonomy", pa.string()),
+            pa.field("charges", pa.string()),
+            pa.field("mass_type", pa.string(), nullable=False),
+            pa.field("precursor_mass_tolerance", pa.float64(), nullable=False),
+            pa.field("precursor_mass_tolerance_ppm", pa.bool_(), nullable=False),
+            pa.field("fragment_mass_tolerance", pa.float64(), nullable=False),
+            pa.field("fragment_mass_tolerance_ppm", pa.bool_(), nullable=False),
+            pa.field("digestion_enzyme", pa.string()),
+            pa.field("enzyme_term_specificity", pa.string()),
+            pa.field("missed_cleavages", pa.int32(), nullable=False),
+            pa.field(
+                "fixed_modifications",
+                pa.list_(pa.string()),
+                nullable=False
+            ),
+            pa.field(
+                "variable_modifications",
+                pa.list_(pa.string()),
+                nullable=False
+            ),
+            pa.field(
+                "primary_ms_run_paths",
+                pa.list_(pa.string()),
+                nullable=False
+            ),
+            pa.field(
+                "metavalues",
+                pa.list_(self.meta_struct),
+                nullable=False
+            ),
+            pa.field(
+                "sp_metavalues",
+                pa.list_(self.meta_struct),
+                nullable=False
+            ),
+        ], metadata={
+            b"software_provider": b"OpenMS",
+            b"creation_date": self.creation_date.encode("utf-8"),
+            b"uuid": str(uuid.uuid4()).encode(),
+            b"file_type": b"search_params",
+            b"creator": b"OpenMS",
+            b"qpx_version": b"1.0",
+        })
+
+    def _init_proteins_schema(self):
+        # =========================================================
+        # proteins schema
+        # =========================================================
+
+        modification_struct = pa.struct([
+            ("position", pa.int32()),
+            ("modification", pa.string()),
+        ])
+
+        self.proteins_schema = pa.schema([
+
+            pa.field(
+                "accession",
+                pa.string(),
+                nullable=False
+            ),
+
+            pa.field(
+                "score",
+                pa.float64(),
+                nullable=False
+            ),
+
+            pa.field(
+                "rank",
+                pa.int32(),
+                nullable=False
+            ),
+
+            pa.field(
+                "coverage",
+                pa.float64()
+            ),
+
+            pa.field(
+                "sequence",
+                pa.string()
+            ),
+
+            pa.field(
+                "description",
+                pa.string()
+            ),
+
+            pa.field(
+                "is_decoy",
+                pa.bool_()
+            ),
+
+            pa.field(
+                "run_identifier",
+                pa.string(),
+                nullable=False
+            ),
+
+            pa.field(
+                "modifications",
+                pa.list_(modification_struct)
+            ),
+
+            pa.field(
+                "metavalues",
+                pa.list_(self.meta_struct),
+                nullable=False
+            ),
+
+        ], metadata={
+            b"software_provider": b"OpenMS",
+            b"creation_date": self.creation_date.encode(),
+            b"uuid": str(uuid.uuid4()).encode(),
+            b"file_type": b"proteins",
+            b"creator": b"OpenMS",
+            b"qpx_version": b"1.0",
+        })
+
+    def _init_protein_groups_schema(self):
+        float_value_struct = pa.struct([
+            ("name", pa.string()),
+            ("values", pa.list_(pa.float64())),
+        ])
+
+        string_value_struct = pa.struct([
+            ("name", pa.string()),
+            ("values", pa.list_(pa.string())),
+        ])
+
+        integer_value_struct = pa.struct([
+            ("name", pa.string()),
+            ("values", pa.list_(pa.int64())),
+        ])
+
+        # =========================================================
+        # protein groups schema
+        # =========================================================
+
+        self.protein_groups_schema = pa.schema([
+            pa.field("group_type", pa.string(), nullable=False),
+            pa.field("probability", pa.float64(), nullable=False),
+            pa.field("accessions", pa.list_(pa.string()), nullable=False),
+            pa.field("run_identifier", pa.string(), nullable=False),
+            pa.field("group_index", pa.int32(), nullable=False),
+            pa.field(
+                "float_data",
+                pa.list_(float_value_struct)
+            ),
+            pa.field(
+                "string_data",
+                pa.list_(string_value_struct)
+            ),
+            pa.field(
+                "integer_data",
+                pa.list_(integer_value_struct)
+            ),
+        ], metadata={
+            b"software_provider": b"OpenMS",
+            b"creation_date": self.creation_date.encode(),
+            b"uuid": str(uuid.uuid4()).encode(),
+            b"file_type": b"protein_groups",
+            b"creator": b"OpenMS",
+            b"qpx_version": b"1.0",
+        })
 
     def _load_parquet(self, parquet_file: Path) -> pd.DataFrame:
         """
@@ -74,7 +457,6 @@ class ParquetReader:
             return {}
 
         df = self._load_parquet(search_params_file)
-
         if df.empty:
             return {}
 

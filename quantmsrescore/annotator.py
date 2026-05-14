@@ -806,14 +806,17 @@ class FeatureAnnotator:
             # Combine existing and new features
             all_features = existing_set.union(added_features)
         self._idparquet_reader.search_params["extra_features"] = ",".join(sorted(all_features))
-        self._idparquet_psm = pa.Table.from_pylist(records)
-        self._idparquet_search_param = pa.Table.from_pylist([self._idparquet_reader.search_params])
+        self._idparquet_psm = pa.Table.from_pylist(records, schema=self._idparquet_reader.psm_schema)
+        self._idparquet_search_param = pa.Table.from_pylist([self._idparquet_reader.search_params],
+                                                            schema=self._idparquet_reader.search_params_schema)
         self._idparquet_proteins = pa.Table.from_pandas(
             self._idparquet_reader.proteins_df,
+            schema=self._idparquet_reader.proteins_schema,
             preserve_index=False
         )
         self._idparquet_protein_groups = pa.Table.from_pandas(
             self._idparquet_reader.protein_groups_df,
+            schema=self._idparquet_reader.protein_groups_schema,
             preserve_index=False
         )
 

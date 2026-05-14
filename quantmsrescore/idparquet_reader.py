@@ -27,6 +27,7 @@ import pyopenms as oms
 from psm_utils import PSM, PSMList
 
 from quantmsrescore.openms import OpenMSHelper
+from quantmsrescore.utils import ParquetReader
 
 # Patterns to match open and closed round/square brackets
 MOD_PATTERN = re.compile(r"\(((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*)\)")
@@ -53,7 +54,7 @@ class ScoreStats:
         return (self.missing_count / self.total_hits * 100) if self.total_hits else 0
 
 
-class ParquetRescoringReader:
+class ParquetRescoringReader(ParquetReader):
     """
     Reader class for parsing Comet/OpenMS parquet identification folders.
 
@@ -74,15 +75,7 @@ class ParquetRescoringReader:
             remove_missing_spectrum: bool = True,
     ) -> None:
 
-        # ⭐ 支持单个 / 多个
-        if isinstance(parquet_dir, (str, Path)):
-            self.parquet_dirs = [Path(parquet_dir)]
-        else:
-            self.parquet_dirs = [Path(p) for p in parquet_dir]
-
-        for p in self.parquet_dirs:
-            if not p.exists():
-                raise FileNotFoundError(f"{p} does not exist")
+        super().__init__(parquet_dir)
 
         self._mzml_path = str(mzml_file) if isinstance(mzml_file, Path) else mzml_file
         self.exp, self.spec_lookup = OpenMSHelper.get_spectrum_lookup_indexer(self._mzml_path)
@@ -93,8 +86,12 @@ class ParquetRescoringReader:
 
         self._psms: Optional[PSMList] = None
         self._psms_df: Optional[pd.DataFrame] = None
+        self._proteins_df: Optional[pd.DataFrame] = None
+        self._protein_groups_df: Optional[pd.DataFrame] = None
 
         self._build_psm_index()
+        self._build_protein_index()
+        self._build_protein_groups_index()
 
     @property
     def psms(self) -> Optional[PSMList]:
@@ -111,45 +108,32 @@ class ParquetRescoringReader:
             raise TypeError("psm_list must be an instance of PSMList")
         self._psms = psm_list
 
-    @psms_df.setter
-    def psms_df(self, psms: pd.DataFrame) -> None:
-        """Set the list of PSMs."""
-        if not isinstance(psms, pd.DataFrame):
-            raise TypeError("psms must be an instance of DataFrame")
-        self._psms_df = psms
+    @property
+    def proteins_df(self) -> Optional[pd.DataFrame]:
+        return self._proteins_df
+
+    @proteins_df.setter
+    def proteins_df(self, proteins_df: pd.DataFrame) -> None:
+        """Get proteins DataFrame."""
+        if not isinstance(proteins_df, pd.DataFrame):
+            raise TypeError("proteins_df must be an instance of DataFrame")
+        self._proteins_df = proteins_df
+
+    @property
+    def protein_groups_df(self) -> Optional[pd.DataFrame]:
+        return self._protein_groups_df
+
+    @protein_groups_df.setter
+    def protein_groups_df(self, protein_groups_df: pd.DataFrame) -> None:
+        """Get protein groups DataFrame."""
+        if not isinstance(protein_groups_df, pd.DataFrame):
+            raise TypeError("protein_groups_df must be an instance of DataFrame")
+        self._protein_groups_df = protein_groups_df
 
     @property
     def spectrum_path(self) -> Optional[Union[str, Path]]:
         """Get the path to the mzML file."""
         return self._mzml_path
-
-    def _load_parquet(self, parquet_file: Path) -> pd.DataFrame:
-        """
-        Load parquet file into pandas DataFrame.
-        """
-        if not parquet_file.exists():
-            logger.warning(f"{parquet_file} not found")
-            return pd.DataFrame()
-
-        return pq.read_table(parquet_file).to_pandas()
-
-    def _load_search_params(self, parquet_dir: Path) -> Dict:
-        """
-        Load search parameters.
-        """
-        search_params_file = parquet_dir / "search_params.parquet"
-        if not search_params_file:
-            return {}
-
-        df = self._load_parquet(search_params_file)
-
-        if df.empty:
-            return {}
-
-        if len(df) == 1:
-            return df.iloc[0].to_dict()
-
-        return df.to_dict(orient="records")
 
     @staticmethod
     def _safe_get(row, keys, default=None):
@@ -399,8 +383,7 @@ class ParquetRescoringReader:
                         merged_psms[prov_key].score = psm.score
                         merged_records[prov_key]["score"] = psm.score
                         merged_records[prov_key]["score_type"] = row["score_type"]
-                    # print(row["psm_metavalues"])
-                    # print(merged_records[prov_key]["psm_metavalues"])
+
                     merged_records[prov_key]["psm_metavalues"] = self.merge_dedup_metavalues(
                         merged_records[prov_key]["psm_metavalues"],
                         psm_metavalues
@@ -446,7 +429,6 @@ class ParquetRescoringReader:
         if isinstance(new, np.ndarray):
             new = new.tolist()
 
-        # name -> value（后者覆盖前者）
         merged = {}
 
         for x in existing + new:
@@ -455,3 +437,157 @@ class ParquetRescoringReader:
             merged[x["name"]] = x
 
         return list(merged.values())
+
+    def _build_protein_index(self):
+        """
+        Build merged protein DataFrame from multiple parquet directories.
+        """
+
+        merged_proteins = {}
+
+        for parquet_dir in self.parquet_dirs:
+
+            proteins_file = parquet_dir / "proteins.parquet"
+
+            if not proteins_file.exists():
+                logger.warning(f"{proteins_file} not found")
+                continue
+
+            proteins_df = self._load_parquet(proteins_file)
+
+            if proteins_df.empty:
+                continue
+
+            for _, row in proteins_df.iterrows():
+
+                record = row.to_dict()
+
+                accession = record["accession"]
+
+                # normalize ndarray -> list
+                metavalues = record.get("metavalues", [])
+                if isinstance(metavalues, np.ndarray):
+                    metavalues = metavalues.tolist()
+
+                record["metavalues"] = metavalues
+
+                # update run_identifier
+                record["run_identifier"] = run_identifier
+
+                if accession not in merged_proteins:
+                    merged_proteins[accession] = copy.deepcopy(record)
+                else:
+                    existing = merged_proteins[accession]
+                    # merge metavalues
+                    existing["metavalues"] = self.merge_dedup_metavalues(
+                        existing.get("metavalues", []),
+                        metavalues
+                    )
+
+        self._proteins_df = pd.DataFrame(merged_proteins.values())
+
+    def _build_protein_groups_index(self):
+        """
+        Build merged protein groups DataFrame.
+        """
+
+        merged_groups = []
+
+        group_index = 0
+
+        for parquet_dir in self.parquet_dirs:
+
+            protein_groups_file = parquet_dir / "protein_groups.parquet"
+
+            if not protein_groups_file.exists():
+                logger.warning(f"{protein_groups_file} not found")
+                continue
+
+            protein_groups_df = self._load_parquet(protein_groups_file)
+
+            if protein_groups_df.empty:
+                continue
+
+            for _, row in protein_groups_df.iterrows():
+
+                record = row.to_dict()
+
+                # normalize ndarray -> list
+                for key in [
+                    "accessions",
+                    "float_data",
+                    "string_data",
+                    "integer_data"
+                ]:
+                    value = record.get(key)
+
+                    if isinstance(value, np.ndarray):
+                        record[key] = value.tolist()
+
+                # overwrite run identifier
+                record["run_identifier"] = run_identifier
+
+                # reassign unique group index
+                record["group_index"] = group_index
+
+                merged_groups.append(record)
+
+                group_index += 1
+
+            logger.info(
+                f"Loaded protein groups from {parquet_dir}"
+            )
+
+        self._protein_groups_df = pd.DataFrame(merged_groups)
+
+    def analyze_score_coverage(self) -> Dict[str, ScoreStats]:
+
+        score_stats: Dict[str, ScoreStats] = defaultdict(ScoreStats)
+
+        total_hits = len(self._psms_df)
+
+        for psm_metavalues in self._psms_df["psm_metavalues"]:
+
+            if psm_metavalues is None:
+                continue
+
+            if isinstance(psm_metavalues, np.ndarray):
+                psm_metavalues = psm_metavalues.tolist()
+
+            seen_scores = {
+                x["name"]
+                for x in psm_metavalues
+                if isinstance(x, dict) and "name" in x
+            }
+
+            for score_name in seen_scores:
+                score_stats[score_name].total_hits += 1
+
+        for stats in score_stats.values():
+            stats.missing_count = total_hits - stats.total_hits
+
+        return score_stats
+
+    @staticmethod
+    def log_score_coverage(score_stats: Dict[str, ScoreStats]) -> None:
+        """
+        Log feature coverage statistics.
+        """
+
+        for score, stats in score_stats.items():
+
+            if stats.missing_count > 0:
+
+                percentage = stats.missing_percentage
+
+                logger.warning(
+                    f"Feature {score} is missing in "
+                    f"{stats.missing_count} PSMs "
+                    f"({percentage:.1f}% of total)"
+                )
+
+                if percentage > 10:
+                    logger.error(
+                        f"Feature {score} is missing "
+                        f"in more than 10% of PSMs"
+                    )
