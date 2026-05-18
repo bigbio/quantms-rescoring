@@ -757,58 +757,25 @@ class FeatureAnnotator:
 
             if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
                 if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
-                    psm_metavalues.append({
-                        "name": "MS:1002049",
-                        "value": str(self._idparquet_reader.min_msgf_RawScore),
-                        "value_type": "int"
-                    })
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                            str(self._idparquet_reader.min_msgf_RawScore),
+                                                            "int")
+
                 if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
-                    psm_metavalues.append({
-                        "name": "MS:1002052",
-                        "value": str(self._idparquet_reader.max_msgf_EValue),
-                        "value_type": "double"
-                    })
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                            str(self._idparquet_reader.max_msgf_EValue),
+                                                            "double")
                 if np.isinf(record["score"]):
                     record["score"] = self._idparquet_reader.max_comet_expectation_value
-                    psm_metavalues.append({
-                        "name": "MS:1002257",
-                        "value": str(record["score"]),
-                        "value_type": "double"
-                    })
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002257",
+                                                            str(record["score"]),
+                                                            "double")
                 if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
-                    psm_metavalues.append({
-                        "name": "MS:1002252",
-                        "value": str(self._idparquet_reader.min_comet_xcorr),
-                        "value_type": "double"
-                    })
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002252",
+                                                            str(self._idparquet_reader.min_comet_xcorr),
+                                                            "double")
 
-            # attach rescoring features
-            for feature, value in psm_features.rescoring_features.items():
-                if isinstance(value, int):
-                    value_type = "int"
-                elif isinstance(value, float):
-                    value_type = "double"
-                else:
-                    value_type = "string"
-
-                canonical_feature = OpenMSHelper.get_canonical_feature(feature)
-                if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
-                    canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
-
-                if canonical_feature is not None:
-                    if (
-                            self._only_features
-                            and canonical_feature not in self._only_features
-                    ):
-                        continue
-                    added_features.add(canonical_feature)
-
-                psm_metavalues.append({
-                    "name": canonical_feature,
-                    "value": str(value),
-                    "value_type": value_type
-                })
-
+            psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
@@ -860,6 +827,45 @@ class FeatureAnnotator:
             self._idparquet_reader.protein_groups,
             schema=self._idparquet_reader.protein_groups_schema
         )
+
+    @staticmethod
+    def add_search_scores(psm_metavalues, name, value, value_type):
+        """Add key-value pairs to the metavalues"""
+        psm_metavalues.append({
+            "name": name,
+            "value": value,
+            "value_type": value_type
+        })
+        return psm_metavalues
+
+    def add_rescoring_features(self, psm_metavalues, psm_features, added_features):
+        """Add rescoring features to the PSM metavalues"""
+        for feature, value in psm_features.rescoring_features.items():
+            if isinstance(value, int):
+                value_type = "int"
+            elif isinstance(value, float):
+                value_type = "double"
+            else:
+                value_type = "string"
+
+            canonical_feature = OpenMSHelper.get_canonical_feature(feature)
+            if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
+                canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
+
+            if canonical_feature is not None:
+                if (
+                        self._only_features
+                        and canonical_feature not in self._only_features
+                ):
+                    continue
+                added_features.add(canonical_feature)
+
+            psm_metavalues.append({
+                "name": canonical_feature,
+                "value": str(value),
+                "value_type": value_type
+            })
+        return psm_metavalues, added_features
 
     def _update_search_parameters(self, features: Set[str]) -> None:
         """

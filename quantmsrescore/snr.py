@@ -42,9 +42,7 @@ class SpectrumMetrics:
         self.weighted_std_mz = weighted_std_mz
 
     def as_dict(self):
-        """
-        Convert metrics into OpenMS MetaValue format.
-        """
+        """Convert metrics into OpenMS MetaValue format."""
         return {
             "Quantms:Snr": OpenMSHelper.get_str_metavalue_round(self.snr),
             "Quantms:SpectralEntropy": OpenMSHelper.get_str_metavalue_round(self.spectral_entropy),

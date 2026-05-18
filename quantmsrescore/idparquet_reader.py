@@ -86,6 +86,7 @@ class ParquetRescoringReader(ParquetReader):
         remove_missing_spectrum : bool, optional
             Whether to remove PSMs with missing or invalid spectra.
         """
+
         super().__init__(parquet_dir)
 
         self._mzml_path = str(mzml_file) if isinstance(mzml_file, Path) else mzml_file
@@ -160,9 +161,7 @@ class ParquetRescoringReader(ParquetReader):
 
     @staticmethod
     def _extract_sequence(peptide: str) -> str:
-        """
-        Extract unmodified peptide sequence.
-        """
+        """Extract unmodified peptide sequence."""
         if peptide is None:
             return None
 
@@ -260,7 +259,6 @@ class ParquetRescoringReader(ParquetReader):
 
     def _parse_psm(self, row: pd.Series) -> Optional[PSM]:
         """Convert parquet row to psm_utils.PSM."""
-
         peptide = self._safe_get(
             row,
             [
@@ -424,22 +422,7 @@ class ParquetRescoringReader(ParquetReader):
                 prov_key = "_".join([row["spectrum_reference"], row["peptidoform"]])
 
                 psm_metavalues = row["psm_metavalues"].tolist()
-
-                if "MS-GF" in search_params["search_engine"]:
-                    msgf_RawScore = float(self.get_meta_features(psm_metavalues, "MS:1002049"))
-                    msgf_EValue = float(record["score"])
-                    if msgf_RawScore < self.min_msgf_RawScore:
-                        self.min_msgf_RawScore = msgf_RawScore
-                    if msgf_EValue > self.max_msgf_EValue:
-                        self.max_msgf_EValue = msgf_EValue
-                else:
-                    comet_xcorr = float(self.get_meta_features(psm_metavalues, "MS:1002252"))
-                    comet_expectation_value = float(record["score"])
-                    if comet_xcorr < self.min_comet_xcorr:
-                        self.min_comet_xcorr = comet_xcorr
-                    if comet_expectation_value > self.max_comet_expectation_value:
-                        self.max_comet_expectation_value = comet_expectation_value
-
+                self.get_default_scores(search_params, psm_metavalues, record)
                 if prov_key not in merged_psms:
                     if "Comet" not in search_params["search_engine"] and self.search_params["search_engine"] == "quantms-rescoring":
                         psm.score = np.inf
@@ -467,6 +450,22 @@ class ParquetRescoringReader(ParquetReader):
         self._psms_df = pd.DataFrame(merged_records.values())
         self._psms_df["run_identifier"] = run_identifier
         self._log_spectrum_statistics()
+
+    def get_default_scores(self, search_params, psm_metavalues, record):
+        if "MS-GF" in search_params["search_engine"]:
+            msgf_RawScore = float(self.get_meta_features(psm_metavalues, "MS:1002049"))
+            msgf_EValue = float(record["score"])
+            if msgf_RawScore < self.min_msgf_RawScore:
+                self.min_msgf_RawScore = msgf_RawScore
+            if msgf_EValue > self.max_msgf_EValue:
+                self.max_msgf_EValue = msgf_EValue
+        else:
+            comet_xcorr = float(self.get_meta_features(psm_metavalues, "MS:1002252"))
+            comet_expectation_value = float(record["score"])
+            if comet_xcorr < self.min_comet_xcorr:
+                self.min_comet_xcorr = comet_xcorr
+            if comet_expectation_value > self.max_comet_expectation_value:
+                self.max_comet_expectation_value = comet_expectation_value
 
     @staticmethod
     def _parse_peptidoform(sequence: str, charge: int) -> str:
@@ -515,7 +514,6 @@ class ParquetRescoringReader(ParquetReader):
         """
         Build merged protein DataFrame from multiple parquet directories.
         """
-
         merged_proteins = {}
 
         for parquet_dir in self.parquet_dirs:
