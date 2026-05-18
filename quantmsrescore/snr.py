@@ -1,227 +1,297 @@
 import re
-from dataclasses import dataclass
-
 import click
 import numpy as np
 from scipy.stats import entropy
-
-from quantmsrescore.idxmlreader import IdXMLReader
+from typing import Set
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pathlib import Path
 from quantmsrescore.logging_config import get_logger, configure_logging
 from quantmsrescore.openms import OpenMSHelper
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 
-# Configure logging with default settings
+# init logging
 configure_logging()
-
-# Get logger for this module
 logger = get_logger(__name__)
 
 
-@dataclass
+# =========================
+# Spectrum feature container
+# =========================
 class SpectrumMetrics:
-    """Data class to hold spectrum analysis metrics"""
+    """Store computed spectrum-level features for one MS/MS spectrum."""
 
-    snr: float
-    spectral_entropy: float
-    fraction_tic_top_10: float
-    weighted_std_mz: float
+    def __init__(self, snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz):
+        """
+        Initialize spectrum-level metrics.
 
-    def as_dict(self) -> dict:
-        """Convert metrics to a dictionary with proper prefixes"""
+        Parameters
+        ----------
+        snr : float
+            Signal-to-noise ratio.
+        spectral_entropy : float
+            Spectral entropy value.
+        fraction_tic_top_10 : float
+            Fraction of TIC explained by top 10 peaks.
+        weighted_std_mz : float
+            Weighted standard deviation of m/z values.
+        """
+        self.snr = snr
+        self.spectral_entropy = spectral_entropy
+        self.fraction_tic_top_10 = fraction_tic_top_10
+        self.weighted_std_mz = weighted_std_mz
 
+    def as_dict(self):
+        """Convert metrics into OpenMS MetaValue format."""
         return {
             "Quantms:Snr": OpenMSHelper.get_str_metavalue_round(self.snr),
             "Quantms:SpectralEntropy": OpenMSHelper.get_str_metavalue_round(self.spectral_entropy),
             "Quantms:FracTICinTop10Peaks": OpenMSHelper.get_str_metavalue_round(
                 self.fraction_tic_top_10
             ),
-            "Quantms:WeightedStdMz": OpenMSHelper.get_str_metavalue_round(self.weighted_std_mz),
+            "Quantms:WeightedStdMz": OpenMSHelper.get_str_metavalue_round(
+                self.weighted_std_mz
+            ),
         }
 
 
+# =========================
+# Spectrum analysis logic
+# =========================
 class SpectrumAnalyzer:
-    """Class to handle spectrum analysis operations"""
 
     @staticmethod
     def compute_signal_to_noise(intensities: np.ndarray) -> float:
         """
-        Compute the signal-to-noise ratio for a given array of intensities.
-
-        Parameters
-        ----------
-        intensities : np.ndarray
-            Array of intensity values.
-
-        Returns
-        -------
-        float
-            The signal-to-noise ratio calculated as the maximum intensity
-            divided by the root mean square deviation of the intensities.
-
-        Raises
-        ------
-        ValueError
-            If the input intensity array is empty.
+        Signal-to-noise ratio = max intensity / RMSD
         """
         if len(intensities) == 0:
-            raise ValueError("Empty intensity array provided")
+            return 0.0
 
-        rmsd = np.sqrt(np.mean(np.square(intensities)))
-        if rmsd == 0:
-            return 0
-
-        return np.max(intensities) / rmsd
+        rmsd = np.sqrt(np.mean(intensities ** 2))
+        return 0.0 if rmsd == 0 else np.max(intensities) / rmsd
 
     @staticmethod
-    def compute_spectrum_metrics(
-        mz_array: np.ndarray, intensity_array: np.ndarray
-    ) -> SpectrumMetrics:
+    def compute_spectrum_metrics(mz_array, intensity_array) -> SpectrumMetrics:
         """
-        Compute various spectrum metrics including signal-to-noise ratio,
-        spectral entropy, fraction of total ion current in the top 10 peaks,
-        and weighted standard deviation of m/z values.
-
-        Parameters
-        ----------
-            mz_array (np.ndarray): Array of m/z values.
-            intensity_array (np.ndarray): Array of intensity values.
-
-        Returns
-        -------
-            SpectrumMetrics: An instance containing computed spectrum metrics.
-
-        Raises
-        ------
-            ValueError: If input arrays are empty, have different lengths, or
-                        if the total ion current is zero.
+        Compute full spectrum-level descriptors.
         """
-        if len(intensity_array) == 0 or len(mz_array) == 0:
-            raise ValueError("Empty arrays provided")
+
+        if len(mz_array) == 0 or len(intensity_array) == 0:
+            raise ValueError("Empty spectrum")
 
         if len(mz_array) != len(intensity_array):
-            raise ValueError("mz_array and intensity_array must have same length")
+            raise ValueError("mz/intensity mismatch")
 
-        # Total Ion Current
         tic = np.sum(intensity_array)
         if tic == 0:
-            raise ValueError("Total ion current is zero")
+            raise ValueError("TIC = 0")
 
-        # Normalized intensities
-        normalized_intensities = intensity_array / tic
+        # normalize intensity
+        norm = intensity_array / tic
 
-        # Calculate all metrics
+        # 1. SNR
         snr = SpectrumAnalyzer.compute_signal_to_noise(intensity_array)
-        spectral_entropy = entropy(normalized_intensities)
 
-        # Top 10 peaks analysis
-        top_n_peaks = np.sort(intensity_array)[-10:]
-        fraction_tic_top_10 = np.sum(top_n_peaks) / tic
+        # 2. entropy
+        spectral_entropy = entropy(norm)
 
-        # Weighted m/z calculations
-        weighted_mean_mz = np.sum(mz_array * normalized_intensities)
-        weighted_std_mz = np.sqrt(
-            np.sum(normalized_intensities * (mz_array - weighted_mean_mz) ** 2)
+        # 3. top-10 TIC fraction
+        top10 = np.sort(intensity_array)[-10:]
+        frac_top10 = np.sum(top10) / tic
+
+        # 4. weighted m/z variance
+        wmz = np.sum(mz_array * norm)
+        wstd = np.sqrt(np.sum(norm * (mz_array - wmz) ** 2))
+
+        return SpectrumMetrics(snr, spectral_entropy, frac_top10, wstd)
+
+
+def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_proteins, idparquet_protein_groups, output):
+    """Write annotated data to idparquet file."""
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    psm_file = output_dir / "psms.parquet"
+    search_param_file = output_dir / "search_params.parquet"
+    proteins_file = output_dir / "proteins.parquet"
+    protein_groups_file = output_dir / "protein_groups.parquet"
+
+    try:
+        out_path = Path(output)
+        pq.write_table(idparquet_psm, psm_file)
+        logger.info(f"psms.parquet file written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_search_param, search_param_file)
+        logger.info(f"search_params.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write search_params.parquet file: {str(e)}")
+        raise
+
+    # proteins.parquet
+    try:
+        pq.write_table(idparquet_proteins, proteins_file)
+        logger.info(f"proteins.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write proteins.parquet file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_protein_groups, protein_groups_file)
+        logger.info(f"protein_groups.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
+        raise
+
+
+def update_search_parameter(idparquet_reader, added_features):
+    # Update search parameters with added features
+    try:
+        features_existing = idparquet_reader.get_meta_features(
+            idparquet_reader.search_params["sp_metavalues"],
+            "extra_features"
         )
+        if features_existing:
+            existing_set = set(features_existing.split(","))
+        else:
+            existing_set = set()
+    except (KeyError, AttributeError, RuntimeError) as e:
+        logger.debug(f"No existing extra_features found: {e}")
+        existing_set = set()
 
-        return SpectrumMetrics(snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz)
+    # Combine existing and new features
+    all_features = existing_set.union(added_features)
+    found = False
+    for mv in idparquet_reader.search_params["sp_metavalues"]:
+        if mv["name"] == "extra_features":
+            mv["value"] = ",".join(sorted(all_features))
+            found = True
+            break
 
+    if not found:
+        idparquet_reader.search_params["sp_metavalues"].append({
+            "name": "extra_features",
+            "value": ",".join(sorted(all_features)),
+            "value_type": "string"
+        })
+    return idparquet_reader
 
+# =========================
+# CLI entry
+# =========================
 @click.command("spectrum2feature")
+@click.option(
+    "-i",
+    "--idparquet",
+    help="Path to the idparquet containing the PSMs from OpenMS",
+    required=True,
+    type=click.Path(exists=True),
+    multiple=True
+)
 @click.option(
     "--mzml",
     type=click.Path(exists=True),
     required=True,
-    help="Path to the mass spectrometry file",
-)
-@click.option(
-    "--idxml",
-    type=click.Path(exists=True),
-    required=True,
-    help="Path to the idXML file with PSMs corresponding to the mzML file",
+    help="mzML file with spectra",
 )
 @click.option(
     "--output",
     type=click.Path(),
     required=True,
-    help="Path for the output idXML file with computed metrics",
+    help="Output parquet file",
 )
-@click.pass_context
-def spectrum2feature(ctx, mzml: str, idxml: str, output: str) -> None:
-    """
-    Command-line tool to compute spectrum metrics and update idXML files.
+def spectrum2feature(parquet, mzml, output):
+    logger.info("[START] spectrum2feature")
+    logger.info(f"Input parquet: {parquet}")
+    logger.info(f"mzML file: {mzml}")
 
-    This command processes an mzML file and an idXML file containing PSMs,
-    computes spectrum metrics for each peptide identification, and updates
-    the idXML file with these metrics.
+    idparquet_reader = ParquetRescoringReader(parquet,
+                                              mzml,
+                                              only_ms2=True,
+                                              remove_missing_spectrum=True,
+                                              )
+    psms_df = idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
 
-    Parameters
-    ----------
-    ctx : click.Context
-        The Click context object.
-    mzml : str
-        Path to the mzML file containing mass spectrometry deeplc_models.
-    idxml : str
-        Path to the idXML file with PSMs corresponding to the mzML file.
-    output : str
-        Path for the output idXML file with computed metrics.
+    result_rows = []
+    added_features: Set[str] = set()
 
-    Raises
-    ------
-    ValueError
-        If no protein identifications are found in the idXML file.
-    """
-    logger.info(f"Processing mzML file: {mzml}")
+    for idx, row in psms_df.iterrows():
 
-    idxml_reader = IdXMLReader(idxml_filename=idxml)
-    idxml_reader.build_spectrum_lookup(mzml, check_unix_compatibility=True)
-    protein_ids = idxml_reader.oms_proteins
-    peptide_ids = idxml_reader.oms_peptides
+        spectrum_reference = row.get("spectrum_reference", None)
 
-    if not protein_ids:
-        raise ValueError("No protein identifications found in idXML file")
-
-    result_peptides = []
-    for peptide in peptide_ids:
-        spectrum_reference = peptide.getMetaValue("spectrum_reference")
-        scan_matches = re.findall(r"(spectrum|scan)=(\d+)", spectrum_reference)
-
-        if not scan_matches:
-            logger.warning(f"Could not parse scan number from reference: {spectrum_reference}")
+        if spectrum_reference is None:
+            logger.warning(f"Missing spectrum_reference at row {idx}")
             continue
 
-        scan_number = int(scan_matches[0][1])
-        spectrum_data = OpenMSHelper.get_peaks_by_scan(scan_number, idxml_reader.exp, idxml_reader.spec_lookup)
+        # parse scan id
+        scan_match = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
+
+        if not scan_match:
+            logger.warning(f"Cannot parse scan: {spectrum_reference}")
+            continue
+
+        scan = int(scan_match[0][1])
+        spectrum_data = OpenMSHelper.get_peaks_by_scan(
+            scan,
+            idparquet_reader.exp,
+            idparquet_reader.spec_lookup,
+        )
 
         if spectrum_data is None:
+            logger.debug(f"No spectrum found for scan {scan}")
             continue
 
+        mz_array, intensity_array = spectrum_data
         try:
-            mz_array, intensity_array = spectrum_data
             metrics = SpectrumAnalyzer.compute_spectrum_metrics(
-                np.array(mz_array), np.array(intensity_array)
+                np.array(mz_array),
+                np.array(intensity_array),
             )
 
-            # Update peptide hits with metrics
-            for hit in peptide.getHits():
-                for key, value in metrics.as_dict().items():
-                    hit.setMetaValue(key, value)
-                peptide.setHits([hit])
+            record = row.to_dict()
+            psm_metavalues = record["psm_metavalues"]
 
-            result_peptides.append(peptide)
+            # attach snr features
+            for feature, value in metrics.as_dict().items():
+                if isinstance(value, int):
+                    value_type = "int"
+                elif isinstance(value, float):
+                    value_type = "double"
+                else:
+                    value_type = "string"
 
-        except ValueError as e:
-            logger.error(f"Error processing scan {scan_number}: {str(e)}")
+                psm_metavalues.append({
+                    "name": feature,
+                    "value": str(value),
+                    "value_type": value_type
+                })
+                added_features.add(feature)
+
+            record["psm_metavalues"] = psm_metavalues
+            result_rows.append(record)
+
+        except Exception as e:
+            logger.error(f"Failed spectrum {scan}: {e}")
             continue
 
-    # Update search parameters with new features
-    search_parameters = protein_ids[0].getSearchParameters()
-    existing_features = search_parameters.getMetaValue("extra_features")
-    new_features = ",".join(metrics.as_dict().keys())
-    extra_features = f"{existing_features},{new_features}" if existing_features else new_features
-    search_parameters.setMetaValue("extra_features", extra_features)
-    protein_ids[0].setSearchParameters(search_parameters)
+    idparquet_reader = update_search_parameter(idparquet_reader, added_features)
 
-    # Save results
-    OpenMSHelper.write_idxml_file(
-        filename=output, protein_ids=protein_ids, peptide_ids=result_peptides
+    idparquet_psm = pa.Table.from_pylist(result_rows, schema=idparquet_reader.psm_schema)
+    idparquet_search_param = pa.Table.from_pylist([idparquet_reader.search_params],
+                                                        schema=idparquet_reader.search_params_schema)
+    idparquet_proteins = pa.Table.from_pandas(
+        idparquet_reader.proteins_df,
+        schema=idparquet_reader.proteins_schema,
+        preserve_index=False
     )
-    logger.info(f"Results saved to: {output}")
+    idparquet_protein_groups = pa.Table.from_pylist(
+        idparquet_reader.protein_groups,
+        schema=idparquet_reader.protein_groups_schema
+    )
+    write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_proteins, idparquet_protein_groups, output)

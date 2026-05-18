@@ -19,10 +19,11 @@ configure_logging()
 )
 @click.option(
     "-i",
-    "--idxml",
-    help="Path to the idxml containing the PSMs from OpenMS",
+    "--idparquet",
+    help="Path to the idparquet containing the PSMs from OpenMS",
     required=True,
     type=click.Path(exists=True),
+    multiple=True
 )
 @click.option(
     "-s",
@@ -34,7 +35,7 @@ configure_logging()
 @click.option(
     "-o",
     "--output",
-    help="Path the output idxml for the annotated PSMs",
+    help="Path the output idparquet for the annotated PSMs",
 )
 @click.option("--log_level", help="Logging level (default: `info`)", default="info")
 @click.option(
@@ -136,7 +137,7 @@ configure_logging()
 @click.pass_context
 def msrescore2feature(
         ctx,
-        idxml: str,
+        idparquet: str,
         mzml,
         output: str,
         log_level,
@@ -251,8 +252,8 @@ def msrescore2feature(
         save_retrain_model=save_retrain_model,
         epoch_to_train_ms2=epoch_to_train_ms2
     )
-    annotator.build_idxml_data(idxml, mzml)
+    annotator.build_consensus_idparquet(idparquet, mzml)
     annotator.annotate()
 
     if output:
-        annotator.write_idxml_file(output)
+        annotator.write_idparquet_file(output)

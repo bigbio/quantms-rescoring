@@ -2,12 +2,12 @@ import copy
 import gc
 from pathlib import Path
 from typing import Optional, Set, Union
-
 from psm_utils import PSMList, PSM
-
+import pyarrow as pa
+import pyarrow.parquet as pq
+import numpy as np
 from quantmsrescore.deeplc import DeepLCAnnotator
-from quantmsrescore.exceptions import Ms2pipIncorrectModelException
-from quantmsrescore.idxmlreader import IdXMLRescoringReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.logging_config import get_logger
 from quantmsrescore.ms2pip import MS2PIPAnnotator
 from quantmsrescore.openms import OpenMSHelper, clear_spectrum_cache
@@ -55,7 +55,8 @@ def _shallow_copy_psm_list(psm_list: PSMList) -> PSMList:
             protein_list=psm.protein_list.copy() if psm.protein_list else [],
             rank=psm.rank,
             source=psm.source,
-            provenance_data=psm.provenance_data.copy() if psm.provenance_data else {},  # Can share as keys are read-only
+            provenance_data=psm.provenance_data.copy() if psm.provenance_data else {},
+            # Can share as keys are read-only
             metadata=psm.metadata.copy() if psm.metadata else {},
             rescoring_features={},  # Fresh dict - this is what will be modified
         )
@@ -149,7 +150,12 @@ class FeatureAnnotator:
             raise ValueError("At least one of deeplc or ms2pip or alphapeptdeep must be provided.")
 
         # Initialize state
-        self._idxml_reader = None
+        self._idparquet_reader = None
+        self._idparquet_psm = None
+        self._idparquet_search_param = None
+        self._idparquet_proteins = None
+        self._idparquet_protein_groups = None
+
         self._deepLC = "deeplc" in feature_annotators
         if "ms2pip" in feature_annotators and ms2_tolerance_unit == "Da":
             self._ms2pip = True
@@ -191,48 +197,19 @@ class FeatureAnnotator:
         self._save_retrain_model = save_retrain_model
         self._epoch_to_train_ms2 = epoch_to_train_ms2
 
-    def build_idxml_data(
-            self, idxml_file: Union[str, Path], spectrum_path: Union[str, Path]
-    ) -> None:
-        """
-        Load data from idXML and mzML files.
-
-        Parameters
-        ----------
-        idxml_file : Union[str, Path]
-            Path to the idXML file containing PSM data.
-        spectrum_path : Union[str, Path]
-            Path to the corresponding mzML file with spectral data.
-
-        Raises
-        ------
-        Exception
-            If loading the files fails.
-        """
-        logger.info(f"Loading data from: {idxml_file}")
-
+    def build_consensus_idparquet(self, parquet_files, spectrum_path):
         try:
-            # Convert paths to Path objects for consistency
-            idxml_path = Path(idxml_file)
-            spectrum_path = Path(spectrum_path)
-
-            # Load the idXML file and corresponding mzML file
-            self._idxml_reader = IdXMLRescoringReader(
-                idxml_filename=idxml_path,
-                mzml_file=spectrum_path,
-                only_ms2=self._ms2_only,
-                remove_missing_spectrum=self._remove_missing_spectra,
-            )
-            self._higher_score_better = self._idxml_reader.high_score_better
-
-            # Log statistics about loaded data
-            psm_list = self._idxml_reader.psms
+            self._idparquet_reader = ParquetRescoringReader(parquet_files,
+                                                            spectrum_path,
+                                                            only_ms2=self._ms2_only,
+                                                            remove_missing_spectrum=self._remove_missing_spectra,
+                                                            )
+            self._higher_score_better = self._idparquet_reader.high_score_better
 
             openms_helper = OpenMSHelper()
-            decoys, targets = openms_helper.count_decoys_targets(self._idxml_reader.oms_peptides)
-
+            decoys, targets = openms_helper.count_decoys_targets(self._idparquet_reader.psms_df)
             logger.info(
-                f"Loaded {len(psm_list)} PSMs from {idxml_path.name}: {decoys} decoys and {targets} targets"
+                f"Loaded {len(self._idparquet_reader.psms)} PSMs from {parquet_files}: {decoys} decoys and {targets} targets"
             )
 
         except Exception as e:
@@ -251,8 +228,8 @@ class FeatureAnnotator:
         ValueError
             If no idXML data is loaded.
         """
-        if not self._idxml_reader:
-            raise ValueError("No idXML data loaded. Call build_idxml_data() first.")
+        if not self._idparquet_reader:
+            raise ValueError("No idXML data loaded. Call build_consensus_idparquet first.")
 
         logger.debug(f"Running annotations with configuration: {self.__dict__}")
 
@@ -263,7 +240,7 @@ class FeatureAnnotator:
             self._run_ms2pip_annotation()
             self.ms2_generator = "MS2PIP"
         elif self._alphapeptdeep:
-            if (2, 'HCD') not in self._idxml_reader._stats.ms_level_dissociation_method:
+            if (2, 'HCD') not in self._idparquet_reader._stats.ms_level_dissociation_method:
                 logger.error(
                     "Found not HCD dissociation methods"
                     "AlphaPeptdeep pretrained models are not trained for not HCD dissociation methods"
@@ -277,38 +254,66 @@ class FeatureAnnotator:
 
         # Convert features to OpenMS format if any annotations were added
         if self._ms2pip or self._alphapeptdeep or self._find_best_model or self._deepLC:
-            self._convert_features_psms_to_oms_peptides()
-
+            # self._convert_features_psms_to_oms_peptides()
+            self._convert_features_psms_to_idparquet()
         # Clear spectrum cache to free memory after annotation is complete
         clear_spectrum_cache()
         gc.collect()
 
         logger.info("Annotation complete")
 
-    def write_idxml_file(self, filename: Union[str, Path]) -> None:
+    def write_idparquet_file(self, filename: Union[str, Path]) -> None:
         """
-        Write annotated data to idXML file.
+        Write annotated data to idparquet file.
 
         Parameters
         ----------
         filename : Union[str, Path]
-            Path where the annotated idXML file will be written.
+            Path where the annotated idparquet file will be written.
 
         Raises
         ------
         Exception
             If writing the file fails.
         """
+        output_dir = Path(filename)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        psm_file = output_dir / "psms.parquet"
+        search_param_file = output_dir / "search_params.parquet"
+        proteins_file = output_dir / "proteins.parquet"
+        protein_groups_file = output_dir / "protein_groups.parquet"
+
         try:
             out_path = Path(filename)
-            OpenMSHelper.write_idxml_file(
-                filename=out_path,
-                protein_ids=self._idxml_reader.openms_proteins,
-                peptide_ids=self._idxml_reader.openms_peptides,
-            )
-            logger.info(f"Annotated idXML file written to {out_path}")
+            pq.write_table(self._idparquet_psm, psm_file)
+            logger.info(f"psms.parquet file written to {out_path}")
         except Exception as e:
-            logger.error(f"Failed to write annotated idXML file: {str(e)}")
+            logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+            raise
+
+        # search_params.parquet
+        try:
+            pq.write_table(self._idparquet_search_param, search_param_file)
+            logger.info(f"search_params.parquet written to {out_path}")
+        except Exception as e:
+            logger.error(f"Failed to write search_params.parquet file: {str(e)}")
+            raise
+
+        # proteins.parquet
+        try:
+            pq.write_table(self._idparquet_proteins, proteins_file)
+            logger.info(f"proteins.parquet written to {out_path}")
+        except Exception as e:
+            logger.error(f"Failed to write proteins.parquet file: {str(e)}")
+            raise
+
+        # search_params.parquet
+        try:
+            pq.write_table(self._idparquet_protein_groups, protein_groups_file)
+            logger.info(f"protein_groups.parquet written to {out_path}")
+        except Exception as e:
+            logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
             raise
 
     def _run_ms2pip_annotation(self) -> None:
@@ -323,7 +328,7 @@ class FeatureAnnotator:
             raise
 
         # Get PSM list
-        psm_list = self._idxml_reader.psms
+        psm_list = self._idparquet_reader.psms
 
         try:
             # Save original model for reference
@@ -381,8 +386,8 @@ class FeatureAnnotator:
             raise
 
         # Get PSM list
-        psm_list = self._idxml_reader.psms
-        psms_df = self._idxml_reader.psms_df
+        psm_list = self._idparquet_reader.psms
+        psms_df = self._idparquet_reader.psms_df
 
         try:
             # Save original model for reference
@@ -434,7 +439,7 @@ class FeatureAnnotator:
             ms2_tolerance=tolerance or self._ms2_tolerance,
             ms2_tolerance_unit=tolerance_unit or self._ms2_tolerance_unit,
             model=model or "generic",
-            spectrum_path=self._idxml_reader.spectrum_path,
+            spectrum_path=self._idparquet_reader.spectrum_path,
             spectrum_id_pattern=self._spectrum_id_pattern,
             model_dir=self._ms2_model_path,
             calibration_set_size=self._calibration_set_size,
@@ -469,7 +474,7 @@ class FeatureAnnotator:
         return MS2PIPAnnotator(
             ms2_tolerance=tolerance or self._ms2_tolerance,
             model=model or self._ms2_model,
-            spectrum_path=self._idxml_reader.spectrum_path,
+            spectrum_path=self._idparquet_reader.spectrum_path,
             spectrum_id_pattern=self._spectrum_id_pattern,
             model_dir=self._ms2_model_path,
             calibration_set_size=self._calibration_set_size,
@@ -533,7 +538,7 @@ class FeatureAnnotator:
             List of PSMs to annotate.
         """
         logger.info("Finding best MS2 model for the dataset")
-        if (2, 'HCD') not in self._idxml_reader._stats.ms_level_dissociation_method:
+        if (2, 'HCD') not in self._idparquet_reader._stats.ms_level_dissociation_method:
             is_HCD = False
         else:
             is_HCD = True
@@ -559,8 +564,8 @@ class FeatureAnnotator:
             logger.error("Failed to initialize all models")
 
         # Get PSM list
-        psm_list = self._idxml_reader.psms
-        psms_df = self._idxml_reader.psms_df
+        psm_list = self._idparquet_reader.psms
+        psms_df = self._idparquet_reader.psms_df
 
         try:
             batch_psms_copy = (
@@ -650,9 +655,9 @@ class FeatureAnnotator:
                 deeplc_annotator = self._determine_optimal_deeplc_model()
 
             # Apply annotation
-            psm_list = self._idxml_reader.psms
+            psm_list = self._idparquet_reader.psms
             deeplc_annotator.add_features(psm_list)
-            self._idxml_reader.psms = psm_list
+            self._idparquet_reader.psms = psm_list
             logger.info("DeepLC annotations added to PSMs")
 
         except Exception as e:
@@ -705,7 +710,7 @@ class FeatureAnnotator:
         The rescoring_features dict is the only mutable part that needs to be fresh.
         """
         # Evaluate retrained model using shallow copy (memory efficient)
-        retrained_psms = _shallow_copy_psm_list(self._idxml_reader.psms)
+        retrained_psms = _shallow_copy_psm_list(self._idparquet_reader.psms)
         retrained_model = self._create_deeplc_annotator(retrain=True, calibration_set_size=0.6)
         retrained_model.add_features(retrained_psms)
         mae_retrained = self._get_mae_from_psm_list(retrained_psms)
@@ -715,7 +720,7 @@ class FeatureAnnotator:
         gc.collect()
 
         # Evaluate pretrained model using shallow copy (memory efficient)
-        pretrained_psms = _shallow_copy_psm_list(self._idxml_reader.psms)
+        pretrained_psms = _shallow_copy_psm_list(self._idparquet_reader.psms)
         pretrained_model = self._create_deeplc_annotator(retrain=False, calibration_set_size=0.6)
         pretrained_model.add_features(pretrained_psms)
         mae_pretrained = self._get_mae_from_psm_list(pretrained_psms)
@@ -736,61 +741,131 @@ class FeatureAnnotator:
             )
             return pretrained_model
 
-    def _convert_features_psms_to_oms_peptides(self) -> None:
+    def _convert_features_psms_to_idparquet(self) -> None:
         """
-        Transfer features from PSM objects to OpenMS peptide objects.
+        Transfer features from PSM objects to idparquet objects.
         """
-        # Create lookup dictionary for PSMs
-        psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idxml_reader.psms}
-
-        oms_peptides = []
+        records = []
+        psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idparquet_reader.psms}
+        psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
         added_features: Set[str] = set()
 
-        # Process each peptide
-        for oms_peptide in self._idxml_reader.oms_peptides:
-            hits = []
+        for _, record in psms_df.iterrows():
+            record = record.to_dict()
+            psm_features = psm_dict.get(record["provenance_data"])
+            psm_metavalues = record["psm_metavalues"]
 
-            # Process each hit within the peptide
-            for oms_psm in oms_peptide.getHits():
-                psm_hash = OpenMSHelper.get_psm_hash_unique_id(
-                    peptide_hit=oms_peptide, psm_hit=oms_psm
+            if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                            str(self._idparquet_reader.min_msgf_RawScore),
+                                                            "int")
+
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                            str(self._idparquet_reader.max_msgf_EValue),
+                                                            "double")
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_comet_expectation_value
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002257",
+                                                            str(record["score"]),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002252",
+                                                            str(self._idparquet_reader.min_comet_xcorr),
+                                                            "double")
+
+            psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
+            record["psm_metavalues"] = psm_metavalues
+            record.pop("provenance_data", None)
+            records.append(record)
+
+        if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+            main_scores_features = {"MS:1002049,MS:1002052,MS:1002252,MS:1002257"}
+            all_features = main_scores_features.union(added_features)
+        else:
+            # Update search parameters with added features
+            try:
+                features_existing = self._idparquet_reader.get_meta_features(
+                    self._idparquet_reader.search_params["sp_metavalues"],
+                    "extra_features"
                 )
-
-                psm = psm_dict.get(psm_hash)
-
-                if psm is None:
-                    logger.warning(f"PSM not found for peptide {oms_peptide.getMetaValue('id')}")
+                if features_existing:
+                    existing_set = set(features_existing.split(","))
                 else:
-                    # Add features to the OpenMS PSM
-                    for feature, value in psm.rescoring_features.items():
-                        canonical_feature = OpenMSHelper.get_canonical_feature(feature)
-                        if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
-                            canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
+                    existing_set = set()
+            except (KeyError, AttributeError, RuntimeError) as e:
+                logger.debug(f"No existing extra_features found: {e}")
+                existing_set = set()
 
-                        if canonical_feature is not None:
-                            if (
-                                    self._only_features
-                                    and canonical_feature not in self._only_features
-                            ):
-                                continue
+            # Combine existing and new features
+            all_features = existing_set.union(added_features)
 
-                            oms_psm.setMetaValue(
-                                canonical_feature, OpenMSHelper.get_str_metavalue_round(value)
-                            )
-                            added_features.add(canonical_feature)
-                        else:
-                            logger.debug(f"Feature {feature} not supported by quantms rescoring")
+        found = False
+        for mv in self._idparquet_reader.search_params["sp_metavalues"]:
+            if mv["name"] == "extra_features":
+                mv["value"] = ",".join(sorted(all_features))
+                found = True
+                break
 
-                hits.append(oms_psm)
+        if not found:
+            self._idparquet_reader.search_params["sp_metavalues"].append({
+                "name": "extra_features",
+                "value": ",".join(sorted(all_features)),
+                "value_type": "string"
+            })
 
-            oms_peptide.setHits(hits)
-            oms_peptides.append(oms_peptide)
+        self._idparquet_psm = pa.Table.from_pylist(records, schema=self._idparquet_reader.psm_schema)
+        self._idparquet_search_param = pa.Table.from_pylist([self._idparquet_reader.search_params],
+                                                            schema=self._idparquet_reader.search_params_schema)
+        self._idparquet_proteins = pa.Table.from_pandas(
+            self._idparquet_reader.proteins_df,
+            schema=self._idparquet_reader.proteins_schema,
+            preserve_index=False
+        )
+        self._idparquet_protein_groups = pa.Table.from_pylist(
+            self._idparquet_reader.protein_groups,
+            schema=self._idparquet_reader.protein_groups_schema
+        )
 
-        # Update search parameters with added features
-        self._update_search_parameters(added_features)
+    @staticmethod
+    def add_search_scores(psm_metavalues, name, value, value_type):
+        """Add key-value pairs to the metavalue."""
+        psm_metavalues.append({
+            "name": name,
+            "value": value,
+            "value_type": value_type
+        })
+        return psm_metavalues
 
-        # Update the peptides in the reader
-        self._idxml_reader.oms_peptides = oms_peptides
+    def add_rescoring_features(self, psm_metavalues, psm_features, added_features):
+        """Add rescoring features to the PSM metavalue."""
+        for feature, value in psm_features.rescoring_features.items():
+            if isinstance(value, int):
+                value_type = "int"
+            elif isinstance(value, float):
+                value_type = "double"
+            else:
+                value_type = "string"
+
+            canonical_feature = OpenMSHelper.get_canonical_feature(feature)
+            if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
+                canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
+
+            if canonical_feature is not None:
+                if (
+                        self._only_features
+                        and canonical_feature not in self._only_features
+                ):
+                    continue
+                added_features.add(canonical_feature)
+
+            psm_metavalues.append({
+                "name": canonical_feature,
+                "value": str(value),
+                "value_type": value_type
+            })
+        return psm_metavalues, added_features
 
     def _update_search_parameters(self, features: Set[str]) -> None:
         """
@@ -807,7 +882,7 @@ class FeatureAnnotator:
         logger.info(f"Adding features to search parameters: {', '.join(sorted(features))}")
 
         # Get search parameters
-        search_parameters = self._idxml_reader.oms_proteins[0].getSearchParameters()
+        search_parameters = self._idparquet_reader.oms_proteins[0].getSearchParameters()
 
         # Get existing features
         try:
@@ -825,7 +900,7 @@ class FeatureAnnotator:
 
         # Update search parameters
         search_parameters.setMetaValue("extra_features", ",".join(sorted(all_features)))
-        self._idxml_reader.oms_proteins[0].setSearchParameters(search_parameters)
+        self._idparquet_reader.oms_proteins[0].setSearchParameters(search_parameters)
 
     def _get_top_batch_psms(self, psm_list: PSMList) -> PSMList:
         """
@@ -868,7 +943,7 @@ class FeatureAnnotator:
         Optional[str]
             "HCD", "CID", or None if not determined.
         """
-        stats = self._idxml_reader.stats
+        stats = self._idparquet_reader.stats
         if not stats or not stats.ms_level_dissociation_method:
             logger.warning("No fragmentation method statistics available")
             return None

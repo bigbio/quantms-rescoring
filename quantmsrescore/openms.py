@@ -12,13 +12,11 @@ filterwarnings(
 
 import numpy as np
 import pyopenms as oms
+import pandas as pd
 from packaging import version
 from psm_utils import PSM, PSMList
 from pyopenms import (
-    PeptideIdentification,
-    ProteinIdentification,
     SpectrumLookup,
-    PeptideHit,
     TheoreticalSpectrumGenerator,
 )
 
@@ -241,108 +239,27 @@ class OpenMSHelper:
     """
 
     @staticmethod
-    def count_decoys_targets(
-        peptide_list: Union[List[PeptideIdentification], List[PeptideHit]],
-    ) -> (int, int):
+    def count_decoys_targets(df: pd.DataFrame) -> tuple[int, int]:
         """
-        Count the number of decoy and target PSMs in the given list.
-
-        This method iterates over a list of PSM objects, counting how many
-        are labeled as 'target' or 'decoy' based on their rescoring features
-        and the `is_decoy` attribute. It ensures that the counts from the
-        rescoring features match the counts from the `is_decoy` attribute.
-
-        Parameters
-        ----------
-        peptide_list (List[PSM]): A list of PeptideIdentification objects to be analyzed.
-
-        Returns
-        -------
-        tuple: A tuple containing the count of decoy PSMs and the count of
-        target PSMs.
-
-        Raises
-        -------
-        ValueError: If the counts from the rescoring features do not match
-        the counts from the `is_decoy` attribute.
+        Count target/decoy from parquet DataFrame.
         """
-
-        openms_count_target = 0
-        openms_count_decoy = 0
-
-        for pep in peptide_list:
-            if isinstance(pep, PeptideHit):
-                if OpenMSHelper.is_decoy_peptide_hit(pep):
-                    openms_count_decoy += 1
-                else:
-                    openms_count_target += 1
-            else:
-                for psm in pep.getHits():
-                    if psm.metaValueExists(OPENMS_DECOY_FIELD):
-                        if psm.getMetaValue(OPENMS_DECOY_FIELD) == "decoy":
-                            openms_count_decoy += 1
-                        else:
-                            openms_count_target += 1
-
-        if openms_count_decoy + openms_count_target == 0:
-            logger.warning("No PSMs found; decoy percentage cannot be computed.")
+        if "is_decoy" not in df.columns:
+            logger.warning("No is_decoy column found")
             return 0, 0
-        percentage_decoy = (openms_count_decoy / (openms_count_decoy + openms_count_target)) * 100
+
+        decoy = int(df["is_decoy"].fillna(False).sum())
+        target = len(df) - decoy
+
         logger.info(
-            "Decoy percentage: %s, targets %s and decoys %s",
-            percentage_decoy,
-            openms_count_target,
-            openms_count_decoy,
+            f"Decoy percentage: {decoy / max(len(df), 1) * 100:.2f}%, "
+            f"targets {target}, decoys {decoy}"
         )
-        return openms_count_decoy, openms_count_target
+        return decoy, target
 
     @staticmethod
-    def get_psm_count(peptide_list: Union[List[PeptideIdentification], List[PeptideHit]]) -> int:
-        """
-        Count the number of PSMs in the given list.
-
-        This method iterates over a list of PSM objects, counting the total
-        number of PSMs.
-
-        Parameters
-        ----------
-        peptide_list (List[PSM]): A list of PeptideIdentification objects to be analyzed.
-
-        Returns
-        -------
-        int: The total number of PSMs in the list.
-        """
-
-        openms_count = 0
-
-        for pep in peptide_list:
-            if isinstance(pep, PeptideHit):
-                openms_count += 1
-            else:
-                openms_count += len(pep.getHits())
-        logger.info("Total PSMs: %s", openms_count)
-        return openms_count
-
-    @staticmethod
-    def is_decoy_peptide_hit(peptide_hit: PeptideHit) -> bool:
-        """
-        Check if a PeptideHit is a decoy.
-
-        This method checks if a PeptideHit is a decoy based on the
-        'target_decoy' field in the PeptideHit.
-
-        Parameters
-        ----------
-        peptide_hit (PeptideIdentification): A PeptideIdentification object to be checked.
-
-        Returns
-        -------
-        bool: True if the PeptideHit is a decoy, False otherwise.
-        """
-
-        if peptide_hit.metaValueExists(OPENMS_DECOY_FIELD):
-            return peptide_hit.getMetaValue(OPENMS_DECOY_FIELD) == "decoy"
-        return False
+    def get_psm_count(df: pd.DataFrame) -> int:
+        """Count rows in PSM parquet table."""
+        return len(df)
 
     @staticmethod
     def get_spectrum_lookup_indexer(
@@ -380,94 +297,50 @@ class OpenMSHelper:
         return exp, lookup
 
     @staticmethod
-    def get_spectrum_reference(
-        identification: Union[PSM, PeptideIdentification]
-    ) -> Union[str, None]:
-        """
-        Get the spectrum reference for a PSM.
-
-        This method retrieves the spectrum reference from a PSM object,
-        which can be either a PSM or a PeptideIdentification object.
-
-        Parameters
-        ----------
-        identification : Union[PSM, PeptideIdentification]
-            The PSM object containing the spectrum reference.
-
-        Returns
-        -------
-        str
-            The spectrum reference for the PSM.
-        """
-        if isinstance(identification, PSM):
-            return identification.spectrum_id
-        elif isinstance(identification, PeptideIdentification):
-            return identification.getMetaValue("spectrum_reference")
-        return None
-
-    @staticmethod
     def get_spectrum_for_psm(
-        psm: Union[PSM, PeptideIdentification], exp: oms.MSExperiment, lookup: SpectrumLookup
+        psm: Union[PSM, dict, pd.Series], exp: oms.MSExperiment, lookup: SpectrumLookup
     ) -> Union[None, oms.MSSpectrum]:
 
-        spectrum_reference = OpenMSHelper.get_spectrum_reference(psm)
+        """
+            Retrieve MS spectrum for a PSM from Parquet-based identification data.
+
+            Notes
+            -----
+            It expects a spectrum reference string stored in Parquet (e.g. scan=1234 or spectrum=1234).
+            """
+
+        # -------- 1. extract spectrum reference --------
+        if isinstance(psm, dict):
+            spectrum_reference = psm.get("spectrum_reference") or psm.get("spectrum_id")
+        else:
+            spectrum_reference = getattr(psm, "spectrum_id", None) or getattr(psm, "spectrum_reference", None)
+
         if spectrum_reference is None:
-            psm_info = psm.provenance_data if hasattr(psm, "provenance_data") else "N/A"
-            logger.warning(
-                f"Missing spectrum reference for PSM {psm_info}, skipping spectrum retrieval."
-            )
+            logger.warning(f"Missing spectrum reference for PSM: {psm}")
             return None
 
-        matches = re.findall(r"(spectrum|scan)=(\d+)", spectrum_reference)
+        # -------- 2. parse scan number --------
+        matches = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
         if not matches:
-            psm_info = psm.provenance_data if hasattr(psm, "provenance_data") else "N/A"
-            logger.warning(
-                f"Missing or invalid spectrum reference for PSM {psm_info}, "
-                f"skipping spectrum retrieval."
-            )
+            logger.warning(f"Invalid spectrum reference format: {spectrum_reference}")
             return None
+
         scan_number = int(matches[0][1])
 
+        # -------- 3. retrieve spectrum --------
         try:
             index = lookup.findByScanNumber(scan_number)
             spectrum = exp.getSpectrum(index)
             return spectrum
 
         except Exception as e:
-            psm_info = psm.provenance_data if hasattr(psm, "provenance_data") else "N/A"
             logger.error(
-                "Error while retrieving spectrum for PSM %s spectrum_ref %s: %s",
-                psm_info,
+                "Error retrieving spectrum for scan=%s, reference=%s: %s",
+                scan_number,
                 spectrum_reference,
                 e,
             )
-        return None
-
-    @staticmethod
-    def write_idxml_file(
-        filename: Union[str, Path],
-        peptide_ids: List[PeptideIdentification],
-        protein_ids: List[ProteinIdentification],
-    ) -> None:
-        """
-        Write protein and peptide identifications to an idXML file.
-
-        Parameters
-        ----------
-        filename : Union[str, Path]
-            The path to the idXML file to be written.
-        peptide_ids : List[PeptideIdentification]
-            A list of PeptideIdentification objects to be written to the file.
-        protein_ids : List[ProteinIdentification]
-            A list of ProteinIdentification objects to be written to the file.
-
-        """
-
-        if isinstance(filename, Path):
-            filename = str(filename)
-
-        id_data = oms.IdXMLFile()
-        id_data.store(filename, protein_ids, peptide_ids)
+            return None
 
     @staticmethod
     def get_peaks_by_scan(
@@ -496,42 +369,49 @@ class OpenMSHelper:
 
     @staticmethod
     def get_ms_level(
-        psm_hit: PeptideIdentification, spec_lookup: oms.SpectrumLookup, exp: oms.MSExperiment
+            psm: Union[PSM, dict, pd.Series],
+            spec_lookup: oms.SpectrumLookup,
+            exp: oms.MSExperiment,
     ) -> int:
-        spectrum = OpenMSHelper.get_spectrum_for_psm(psm_hit, exp, spec_lookup)
-        if spectrum is None:
-            return -1
-        return spectrum.getMSLevel()
-
-    @staticmethod
-    def get_psm_hash_unique_id(peptide_hit: PeptideIdentification, psm_hit: PeptideHit) -> str:
         """
-        Generate a unique hash identifier for a PSM.
-
-        This method constructs a unique hash string for a given PSM by
-        combining the peptide sequence, charge, retention time, and
-        spectrum reference.
+        Retrieve MS level for a Parquet-based PSM.
 
         Parameters
         ----------
-        peptide_hit : PeptideIdentification
-            The PeptideIdentification object containing metadata for the PSM.
-        psm_hit : PeptideHit
-            The PeptideHit object representing the PSM.
+        psm : Union[PSM, dict, pd.Series]
+            PSM object or parquet row containing spectrum reference.
+        spec_lookup : oms.SpectrumLookup
+            OpenMS spectrum lookup index.
+        exp : oms.MSExperiment
+            Loaded mzML experiment.
 
         Returns
         -------
-        str
-            A unique hash string for the PSM.
+        int
+            MS level, or -1 if unavailable.
         """
 
-        spectrum_ref = peptide_hit.getMetaValue("spectrum_reference")
-        rank = psm_hit.getRank()
-        rt = peptide_hit.getRT()
-        sequence = psm_hit.getSequence().toString()
-        charge = psm_hit.getCharge()
-        unique_hash = f"{spectrum_ref}_{sequence}_{rt}_{charge}_{rank}"
-        return unique_hash
+        spectrum = OpenMSHelper.get_spectrum_for_psm(
+            psm,
+            exp,
+            spec_lookup
+        )
+
+        if spectrum is None:
+            return -1
+
+        try:
+            return int(spectrum.getMSLevel())
+        except Exception as e:
+            logger.warning(f"Failed to retrieve MS level: {e}")
+            return -1
+
+    @staticmethod
+    def get_psm_hash_unique_id(row: dict) -> str:
+        """
+        Generate unique PSM key from parquet row.
+        """
+        return f"{row.get('spectrum_ref')}_{row.get('sequence')}_{row.get('retention_time')}_{row.get('charge')}_{row.get('rank')}"
 
     @staticmethod
     def get_str_metavalue_round(metavalue: float):
@@ -720,30 +600,34 @@ class OpenMSHelper:
 
     @staticmethod
     def get_ms_tolerance(
-        oms_proteins: List[ProteinIdentification],
-    ) -> Union[Tuple[float, str], Tuple[float, None]]:
+            search_params: dict,
+    ) -> Tuple[float, Optional[str]]:
         """
-        Get the mass tolerance and unit from the search parameters.
+        Get fragment mass tolerance from Parquet search parameters.
 
         Parameters
         ----------
-        oms_proteins : List[ProteinIdentification]
-            The list of ProteinIdentification objects to be analyzed.
+        search_params : dict
+            Dictionary loaded from search_params.parquet.
 
         Returns
         -------
-        Tuple[float, str]
-            A tuple containing the mass tolerance and the unit.
-
+        Tuple[float, Optional[str]]
+            Mass tolerance and unit ("ppm" or "Da").
         """
 
-        if oms_proteins is None:
+        if not search_params:
             return 0.0, None
-        search_parameters = oms_proteins[0].getSearchParameters()
-        if search_parameters.fragment_mass_tolerance_ppm:
-            return search_parameters.fragment_mass_tolerance, "ppm"
-        else:
-            return search_parameters.fragment_mass_tolerance, "Da"
+
+        tolerance = search_params.get("fragment_mass_tolerance", 0.0)
+
+        # OpenMS sometimes encodes ppm flag explicitly
+        if search_params.get("fragment_mass_tolerance_ppm", False):
+            return float(tolerance), "ppm"
+
+        # fallback
+        unit = search_params.get("fragment_mass_tolerance_unit", "Da")
+        return float(tolerance), unit
 
     @staticmethod
     def generate_theoretical_spectrum(peptide_sequence: str, charge: int):
@@ -879,7 +763,28 @@ class OpenMSHelper:
         return instrument
 
     @staticmethod
-    def get_nce_psm(psm_hit: PeptideIdentification, spec_lookup: oms.SpectrumLookup, exp: oms.MSExperiment):
-        spectrum = OpenMSHelper.get_spectrum_for_psm(psm_hit, exp, spec_lookup)
-        collision_energy = float(re.findall(r"@[a-zA-Z]+(\d+\.\d+)\s", spectrum.getMetaValue("filter string"))[0])
-        return collision_energy
+    def get_nce_psm(
+            psm: Union[PSM, dict],
+            exp: oms.MSExperiment,
+            lookup: oms.SpectrumLookup
+    ) -> Optional[float]:
+        """
+        Extract collision energy (NCE).
+        """
+
+        # -------- spectrum metadata --------
+        spectrum = OpenMSHelper.get_spectrum_for_psm(psm, exp, lookup)
+        if spectrum is None:
+            return None
+
+        meta = spectrum.getMetaValue("filter string")
+
+        if not meta:
+            return None
+
+        # -------- robust regex extraction --------
+        match = re.search(r"@([A-Za-z]+)(\d+(?:\.\d+)?)", str(meta))
+        if not match:
+            return None
+
+        return float(match.group(2))
