@@ -39,9 +39,13 @@ run_identifier = f"quantms-rescoring_{now.strftime('%Y-%m-%d_%H:%M:%S')}"
 
 
 class ScoreStats:
+
     """Statistics about score occurrence in peptide hits."""
 
     def __init__(self):
+        """
+        Initialize score statistics counters.
+        """
         self.total_hits: int = 0
         self.missing_count: int = 0
 
@@ -52,6 +56,7 @@ class ScoreStats:
 
 
 class ParquetRescoringReader(ParquetReader):
+
     """
     Reader class for parsing Comet/OpenMS parquet identification folders.
 
@@ -71,7 +76,20 @@ class ParquetRescoringReader(ParquetReader):
             only_ms2: bool = True,
             remove_missing_spectrum: bool = True,
     ) -> None:
+        """
+        Initialize the parquet rescoring reader.
 
+        Parameters
+        ----------
+        parquet_dir : Union[str, Path, List[Union[str, Path]]]
+            Path(s) to parquet identification directory.
+        mzml_file : Union[str, Path]
+            Path to mzML file containing MS spectra.
+        only_ms2 : bool, optional
+            Whether to keep only MS2 spectra.
+        remove_missing_spectrum : bool, optional
+            Whether to remove PSMs with missing or invalid spectra.
+        """
         super().__init__(parquet_dir)
 
         self._mzml_path = str(mzml_file) if isinstance(mzml_file, Path) else mzml_file
@@ -138,9 +156,7 @@ class ParquetRescoringReader(ParquetReader):
 
     @staticmethod
     def _safe_get(row, keys, default=None):
-        """
-        Safely get value from row using candidate column names.
-        """
+        """Safely get value from row using candidate column names."""
         for k in keys:
             if k in row:
                 return row[k]
@@ -164,7 +180,6 @@ class ParquetRescoringReader(ParquetReader):
         """
         Convert OpenMS parquet modification structure into AlphaPeptDeep format.
         """
-
         # empty input
         if modifications is None:
             return "", ""
@@ -469,6 +484,7 @@ class ParquetRescoringReader(ParquetReader):
         Implemented according to the documentation on
         `github.com/OpenMS/OpenMS <https://github.com/OpenMS/OpenMS/blob/8cb90/src/openms/include/OpenMS/CHEMISTRY/AASequence.h>`_
         . The differentiation between square- and round bracket notation is removed after parsing.
+
         """
         sequence = MOD_PATTERN.sub(r"[\1]", sequence)
         if sequence[:2] == ".[":

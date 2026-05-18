@@ -19,11 +19,26 @@ logger = get_logger(__name__)
 # Spectrum feature container
 # =========================
 class SpectrumMetrics:
+
     """
     Store computed spectrum-level features for one MS/MS spectrum.
     """
 
     def __init__(self, snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz):
+        """
+        Initialize spectrum-level metrics.
+
+        Parameters
+        ----------
+        snr : float
+            Signal-to-noise ratio.
+        spectral_entropy : float
+            Spectral entropy value.
+        fraction_tic_top_10 : float
+            Fraction of TIC explained by top 10 peaks.
+        weighted_std_mz : float
+            Weighted standard deviation of m/z values.
+        """
         self.snr = snr
         self.spectral_entropy = spectral_entropy
         self.fraction_tic_top_10 = fraction_tic_top_10
@@ -96,6 +111,48 @@ class SpectrumAnalyzer:
 
         return SpectrumMetrics(snr, spectral_entropy, frac_top10, wstd)
 
+
+def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_proteins, idparquet_protein_groups, output):
+    """Write annotated data to idparquet file."""
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    psm_file = output_dir / "psms.parquet"
+    search_param_file = output_dir / "search_params.parquet"
+    proteins_file = output_dir / "proteins.parquet"
+    protein_groups_file = output_dir / "protein_groups.parquet"
+
+    try:
+        out_path = Path(output)
+        pq.write_table(idparquet_psm, psm_file)
+        logger.info(f"psms.parquet file written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_search_param, search_param_file)
+        logger.info(f"search_params.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write search_params.parquet file: {str(e)}")
+        raise
+
+    # proteins.parquet
+    try:
+        pq.write_table(idparquet_proteins, proteins_file)
+        logger.info(f"proteins.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write proteins.parquet file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_protein_groups, protein_groups_file)
+        logger.info(f"protein_groups.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
+        raise
 
 # =========================
 # CLI entry
@@ -254,43 +311,4 @@ def spectrum2feature(parquet, mzml, output):
         idparquet_reader.protein_groups,
         schema=idparquet_reader.protein_groups_schema
     )
-
-    output_dir = Path(output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    psm_file = output_dir / "psms.parquet"
-    search_param_file = output_dir / "search_params.parquet"
-    proteins_file = output_dir / "proteins.parquet"
-    protein_groups_file = output_dir / "protein_groups.parquet"
-
-    try:
-        out_path = Path(output)
-        pq.write_table(idparquet_psm, psm_file)
-        logger.info(f"psms.parquet file written to {out_path}")
-    except Exception as e:
-        logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
-        raise
-
-    # search_params.parquet
-    try:
-        pq.write_table(idparquet_search_param, search_param_file)
-        logger.info(f"search_params.parquet written to {out_path}")
-    except Exception as e:
-        logger.error(f"Failed to write search_params.parquet file: {str(e)}")
-        raise
-
-    # proteins.parquet
-    try:
-        pq.write_table(idparquet_proteins, proteins_file)
-        logger.info(f"proteins.parquet written to {out_path}")
-    except Exception as e:
-        logger.error(f"Failed to write proteins.parquet file: {str(e)}")
-        raise
-
-    # search_params.parquet
-    try:
-        pq.write_table(idparquet_protein_groups, protein_groups_file)
-        logger.info(f"protein_groups.parquet written to {out_path}")
-    except Exception as e:
-        logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
-        raise
+    write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_proteins, idparquet_protein_groups, output)
