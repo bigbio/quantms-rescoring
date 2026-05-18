@@ -3,7 +3,7 @@ name = "quantms-rescoring"
 description = "quantms-rescoring: Python scripts and helpers for the quantMS workflow"
 readme = "README.md"
 license = "MIT"
-version = "0.0.16"
+version = "0.0.17"
 authors = [
     "Yasset Perez-Riverol <ypriverol@gmail.com>",
     "Dai Chengxin <chengxin2024@126.com>",
@@ -35,15 +35,15 @@ packages = [
 python = ">=3.9,<3.12"
 click = "*"
 pyopenms = "3.4.0"
-ms2rescore = "3.2.0.post1"
+ms2rescore = "3.2.1"
 pandas = "*"
 numpy = ">=1.25"
 psm-utils = "*"
-deepLC = ">=3.0"
+deepLC = "3.1.13"
 scipy = "*"
 pygam = "*"
 protobuf= "*"
-ms2pip = ">=4.0"
+ms2pip = "4.1.2"
 peptdeep = "1.4.1"
 torch = "<2.10.0"
 psutil = "*"  # For memory-aware process count in HPC environments
