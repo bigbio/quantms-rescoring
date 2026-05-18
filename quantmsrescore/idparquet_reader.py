@@ -39,13 +39,10 @@ run_identifier = f"quantms-rescoring_{now.strftime('%Y-%m-%d_%H:%M:%S')}"
 
 
 class ScoreStats:
-
     """Statistics about score occurrence in peptide hits."""
 
     def __init__(self):
-        """
-        Initialize score statistics counters.
-        """
+        """Initialize score statistics counters."""
         self.total_hits: int = 0
         self.missing_count: int = 0
 
@@ -56,7 +53,6 @@ class ScoreStats:
 
 
 class ParquetRescoringReader(ParquetReader):
-
     """
     Reader class for parsing Comet/OpenMS parquet identification folders.
 
@@ -263,9 +259,7 @@ class ParquetRescoringReader(ParquetReader):
         return ";".join(mods_res), ";".join(mod_sites)
 
     def _parse_psm(self, row: pd.Series) -> Optional[PSM]:
-        """
-        Convert parquet row to psm_utils.PSM.
-        """
+        """Convert parquet row to psm_utils.PSM."""
 
         peptide = self._safe_get(
             row,

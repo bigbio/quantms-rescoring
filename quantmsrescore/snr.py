@@ -19,10 +19,7 @@ logger = get_logger(__name__)
 # Spectrum feature container
 # =========================
 class SpectrumMetrics:
-
-    """
-    Store computed spectrum-level features for one MS/MS spectrum.
-    """
+    """Store computed spectrum-level features for one MS/MS spectrum."""
 
     def __init__(self, snr, spectral_entropy, fraction_tic_top_10, weighted_std_mz):
         """
@@ -154,6 +151,39 @@ def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_protei
         logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
         raise
 
+
+def update_search_parameter(idparquet_reader, added_features):
+    # Update search parameters with added features
+    try:
+        features_existing = idparquet_reader.get_meta_features(
+            idparquet_reader.search_params["sp_metavalues"],
+            "extra_features"
+        )
+        if features_existing:
+            existing_set = set(features_existing.split(","))
+        else:
+            existing_set = set()
+    except (KeyError, AttributeError, RuntimeError) as e:
+        logger.debug(f"No existing extra_features found: {e}")
+        existing_set = set()
+
+    # Combine existing and new features
+    all_features = existing_set.union(added_features)
+    found = False
+    for mv in idparquet_reader.search_params["sp_metavalues"]:
+        if mv["name"] == "extra_features":
+            mv["value"] = ",".join(sorted(all_features))
+            found = True
+            break
+
+    if not found:
+        idparquet_reader.search_params["sp_metavalues"].append({
+            "name": "extra_features",
+            "value": ",".join(sorted(all_features)),
+            "value_type": "string"
+        })
+    return idparquet_reader
+
 # =========================
 # CLI entry
 # =========================
@@ -183,9 +213,6 @@ def spectrum2feature(parquet, mzml, output):
     logger.info(f"Input parquet: {parquet}")
     logger.info(f"mzML file: {mzml}")
 
-    # =========================
-    # 1. Load Parquet pipeline
-    # =========================
     idparquet_reader = ParquetRescoringReader(parquet,
                                               mzml,
                                               only_ms2=True,
@@ -196,9 +223,6 @@ def spectrum2feature(parquet, mzml, output):
     result_rows = []
     added_features: Set[str] = set()
 
-    # =========================
-    # 2. iterate PSMs
-    # =========================
     for idx, row in psms_df.iterrows():
 
         spectrum_reference = row.get("spectrum_reference", None)
@@ -215,10 +239,6 @@ def spectrum2feature(parquet, mzml, output):
             continue
 
         scan = int(scan_match[0][1])
-
-        # =========================
-        # 3. fetch spectrum
-        # =========================
         spectrum_data = OpenMSHelper.get_peaks_by_scan(
             scan,
             idparquet_reader.exp,
@@ -230,10 +250,6 @@ def spectrum2feature(parquet, mzml, output):
             continue
 
         mz_array, intensity_array = spectrum_data
-
-        # =========================
-        # 4. compute features
-        # =========================
         try:
             metrics = SpectrumAnalyzer.compute_spectrum_metrics(
                 np.array(mz_array),
@@ -266,39 +282,8 @@ def spectrum2feature(parquet, mzml, output):
             logger.error(f"Failed spectrum {scan}: {e}")
             continue
 
-    # Update search parameters with added features
-    try:
-        features_existing = idparquet_reader.get_meta_features(
-            idparquet_reader.search_params["sp_metavalues"],
-            "extra_features"
-        )
-        if features_existing:
-            existing_set = set(features_existing.split(","))
-        else:
-            existing_set = set()
-    except (KeyError, AttributeError, RuntimeError) as e:
-        logger.debug(f"No existing extra_features found: {e}")
-        existing_set = set()
+    idparquet_reader = update_search_parameter(idparquet_reader, added_features)
 
-    # Combine existing and new features
-    all_features = existing_set.union(added_features)
-    found = False
-    for mv in idparquet_reader.search_params["sp_metavalues"]:
-        if mv["name"] == "extra_features":
-            mv["value"] = ",".join(sorted(all_features))
-            found = True
-            break
-
-    if not found:
-        idparquet_reader.search_params["sp_metavalues"].append({
-            "name": "extra_features",
-            "value": ",".join(sorted(all_features)),
-            "value_type": "string"
-        })
-
-    # =========================
-    # 5. output
-    # =========================
     idparquet_psm = pa.Table.from_pylist(result_rows, schema=idparquet_reader.psm_schema)
     idparquet_search_param = pa.Table.from_pylist([idparquet_reader.search_params],
                                                         schema=idparquet_reader.search_params_schema)

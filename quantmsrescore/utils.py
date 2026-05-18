@@ -439,9 +439,7 @@ class ParquetReader:
         })
 
     def _load_parquet(self, parquet_file: Path) -> pd.DataFrame:
-        """
-        Load parquet file into pandas DataFrame.
-        """
+        """Load parquet file into pandas DataFrame."""
         if not parquet_file.exists():
             logger.warning(f"{parquet_file} not found")
             return pd.DataFrame()
