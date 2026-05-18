@@ -86,7 +86,6 @@ class ParquetRescoringReader(ParquetReader):
         remove_missing_spectrum : bool, optional
             Whether to remove PSMs with missing or invalid spectra.
         """
-
         super().__init__(parquet_dir)
 
         self._mzml_path = str(mzml_file) if isinstance(mzml_file, Path) else mzml_file
@@ -172,9 +171,7 @@ class ParquetRescoringReader(ParquetReader):
 
     @staticmethod
     def _extract_modifications(modifications):
-        """
-        Convert OpenMS parquet modification structure into AlphaPeptDeep format.
-        """
+        """Convert OpenMS parquet modification structure into AlphaPeptDeep format."""
         # empty input
         if modifications is None:
             return "", ""
@@ -353,9 +350,7 @@ class ParquetRescoringReader(ParquetReader):
             return None
 
     def _build_psm_index(self, only_ms2, remove_missing_spectrum):
-        """
-        Build PSMList and DataFrame.
-        """
+        """Build PSMList and DataFrame."""
         for parquet_dir in self.parquet_dirs:
             search_params = self._load_search_params(parquet_dir)
             if self.search_params is None:

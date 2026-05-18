@@ -830,7 +830,7 @@ class FeatureAnnotator:
 
     @staticmethod
     def add_search_scores(psm_metavalues, name, value, value_type):
-        """Add key-value pairs to the metavalues"""
+        """Add key-value pairs to the metavalue."""
         psm_metavalues.append({
             "name": name,
             "value": value,
@@ -839,7 +839,7 @@ class FeatureAnnotator:
         return psm_metavalues
 
     def add_rescoring_features(self, psm_metavalues, psm_features, added_features):
-        """Add rescoring features to the PSM metavalues"""
+        """Add rescoring features to the PSM metavalue."""
         for feature, value in psm_features.rescoring_features.items():
             if isinstance(value, int):
                 value_type = "int"
