@@ -9,11 +9,10 @@ logger = get_logger(__name__)
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Union, List, Optional, Dict, Tuple, DefaultDict
+from typing import Union, List, Optional, Dict
 from warnings import filterwarnings
 import pandas as pd
 import re
-import pyarrow.parquet as pq
 import copy
 from datetime import datetime, timezone
 
@@ -24,8 +23,6 @@ filterwarnings(
     module="pyopenms",
 )
 
-import psm_utils
-import pyopenms as oms
 from psm_utils import PSM, PSMList
 
 from quantmsrescore.openms import OpenMSHelper
@@ -130,7 +127,7 @@ class ParquetRescoringReader(ParquetReader):
     @protein_groups.setter
     def protein_groups(self, protein_groups: List[Dict]) -> None:
         """Get protein groups DataFrame."""
-        if not isinstance(protein_groups_df, List):
+        if not isinstance(protein_groups, List):
             raise TypeError("protein_groups_df must be an instance of List")
         self._protein_groups = protein_groups
 
@@ -366,9 +363,8 @@ class ParquetRescoringReader(ParquetReader):
         merged_psms = {}
         self._stats = SpectrumStats()
         instrument = OpenMSHelper.get_instrument(self.exp)
-
         merged_records = {}
-        spectra_id = set()
+
         for parquet_dir in self.parquet_dirs:
             psms_file = parquet_dir / "psms.parquet"
             psms_df = self._load_parquet(psms_file)
@@ -379,7 +375,6 @@ class ParquetRescoringReader(ParquetReader):
             for _, row in psms_df.iterrows():
                 if not self.validate_psm(row, only_ms2=only_ms2, remove_missing_spectrum=remove_missing_spectrum):
                     continue
-                spectra_id.add(row["spectrum_reference"])
                 psm = self._parse_psm(row)
                 high_score_better = self._safe_get(
                     row,

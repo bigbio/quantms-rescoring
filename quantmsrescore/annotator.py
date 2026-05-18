@@ -1,14 +1,12 @@
 import copy
 import gc
 from pathlib import Path
-from typing import Optional, Set, Union, DefaultDict
-from collections import defaultdict
+from typing import Optional, Set, Union
 from psm_utils import PSMList, PSM
 import pyarrow as pa
 import pyarrow.parquet as pq
 import numpy as np
 from quantmsrescore.deeplc import DeepLCAnnotator
-from quantmsrescore.exceptions import Ms2pipIncorrectModelException
 from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.logging_config import get_logger
 from quantmsrescore.ms2pip import MS2PIPAnnotator

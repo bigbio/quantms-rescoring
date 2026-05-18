@@ -13,7 +13,9 @@ filterwarnings(
 )
 
 import click
-
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pathlib import Path
 from quantmsrescore.logging_config import configure_logging
 from quantmsrescore.idparquet_reader import ParquetRescoringReader
 

@@ -1,9 +1,11 @@
 import re
 import click
 import numpy as np
-import pandas as pd
 from scipy.stats import entropy
-from typing import Optional, Set, Union, DefaultDict
+from typing import Set
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pathlib import Path
 from quantmsrescore.logging_config import get_logger, configure_logging
 from quantmsrescore.openms import OpenMSHelper
 from quantmsrescore.idparquet_reader import ParquetRescoringReader

@@ -3,7 +3,6 @@ from quantmsrescore.logging_config import get_logger
 from collections import defaultdict
 from pathlib import Path
 from typing import Union, List, Optional, Dict, Tuple, DefaultDict
-from quantmsrescore.exceptions import MS3NotSupportedException
 import pyopenms as oms
 import pandas as pd
 import pyarrow.parquet as pq
