@@ -122,7 +122,7 @@ class SpectrumAnalyzer:
     help="Output parquet file",
 )
 def spectrum2feature(parquet, mzml, output):
-    logger.info(f"[START] spectrum2feature")
+    logger.info("[START] spectrum2feature")
     logger.info(f"Input parquet: {parquet}")
     logger.info(f"mzML file: {mzml}")
 

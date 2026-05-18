@@ -11,7 +11,6 @@ from quantmsrescore.openms import OpenMSHelper
 from datetime import datetime, timezone
 import uuid
 import numpy as np
-from psm_utils import PSM, PSMList
 
 logger = get_logger(__name__)
 
