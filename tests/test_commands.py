@@ -5,7 +5,7 @@ import pytest
 from click.testing import CliRunner
 
 from quantmsrescore.annotator import FeatureAnnotator
-from quantmsrescore.idxmlreader import IdXMLRescoringReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.openms import OpenMSHelper
 from quantmsrescore.rescoring import cli
 
@@ -22,8 +22,8 @@ def test_ms2rescore():
         cli,
         [
             "msrescore2feature",
-            "--idxml",
-            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML".format(
+            "--idparquet",
+            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet".format(
                 TESTS_DIR
             ),
             "--mzml",
@@ -39,56 +39,28 @@ def test_ms2rescore():
     assert result.exit_code == 0
 
 
-@pytest.mark.skip(reason="This is for local test in big datasets, skipping for now")
-def test_ms2rescore_failing():
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "msrescore2feature",
-            "--idxml",
-            "{}/test_data/dae1cb16fb57893b94bfcb731b2bf7/Instrument1_sample14_S1R10_042116_Fr12_msgf.idXML".format(
-                TESTS_DIR
-            ),
-            "--mzml",
-            "{}/test_data/dae1cb16fb57893b94bfcb731b2bf7/Instrument1_sample14_S1R10_042116_Fr12.mzML".format(
-                TESTS_DIR
-            ),
-            "--processes",
-            "2",
-            "--ms2_tolerance",
-            "0.4",
-            "--calibration_set_size",
-            "0.15",
-            "--feature_generators",
-            "deeplc,ms2pip",
-        ],
-    )
-    assert result.exit_code == 0
-
-
 def test_idxmlreader():
 
-    idxml_file = (
+    id_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet"
     )
 
     mzml_file = (
         TESTS_DIR / "test_data" / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML"
     )
 
-    idxml_reader = IdXMLRescoringReader(idxml_filename=idxml_file, mzml_file=mzml_file)
-    logging.info("Loaded %s PSMs from %s", len(idxml_reader.psms), idxml_file)
+    idxml_reader = ParquetRescoringReader(id_file, mzml_file)
+    logging.info("Loaded %s PSMs from %s", len(idxml_reader.psms), id_file)
     assert len(idxml_reader.psms) == 5346
 
     openms_helper = OpenMSHelper()
-    decoys, targets = openms_helper.count_decoys_targets(idxml_reader.oms_peptides)
+    decoys, targets = openms_helper.count_decoys_targets(idxml_reader.psms_df)
     logging.info(
         "Loaded %s PSMs from %s, %s decoys and %s targets",
         len(idxml_reader.psms),
-        idxml_file,
+        id_file,
         decoys,
         targets,
     )
@@ -100,10 +72,10 @@ def test_idxmlreader():
 
 def test_annotator_train_rt():
 
-    idxml_file = (
+    id_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet"
     )
 
     mzml_file = (
@@ -120,24 +92,24 @@ def test_annotator_train_rt():
         spectrum_id_pattern="(.*)",
         psm_id_pattern="(.*)",
     )
-    annotator.build_idxml_data(idxml_file, mzml_file)
+    annotator.build_consensus_idparquet(id_file, mzml_file)
     annotator.annotate()
 
     output_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idparquet"
     )
 
-    annotator.write_idxml_file(output_file)
+    annotator.write_idparquet_file(output_file)
 
 
 def test_idxmlreader_filtering():
 
-    idxml_file = (
+    id_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet"
     )
 
     mzml_file = (
@@ -155,24 +127,24 @@ def test_idxmlreader_filtering():
         spectrum_id_pattern="(.*)",
         psm_id_pattern="(.*)",
     )
-    annotator.build_idxml_data(idxml_file, mzml_file)
+    annotator.build_consensus_idparquet(id_file, mzml_file)
     annotator.annotate()
 
     output_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idparquet"
     )
 
-    annotator.write_idxml_file(output_file)
+    annotator.write_idparquet_file(output_file)
 
 
 def test_idxmlreader_wrong_model():
 
-    idxml_file = (
+    id_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet"
     )
 
     mzml_file = (
@@ -190,76 +162,23 @@ def test_idxmlreader_wrong_model():
         spectrum_id_pattern="(.*)",
         psm_id_pattern="(.*)",
     )
-    annotator.build_idxml_data(idxml_file, mzml_file)
+    annotator.build_consensus_idparquet(id_file, mzml_file)
     annotator.annotate()
 
     output_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_rescored.idparquet"
     )
 
-    annotator.write_idxml_file(output_file)
-
-
-@pytest.mark.skip(reason="This is for local test in big datasets, skipping for now")
-def test_idxmlreader_failing_help():
-    idxml_file = (
-        TESTS_DIR
-        / "test_data"
-        / "dae1cb16fb57893b94bfcb731b2bf7"
-        / "01321_E03_P013560_B00_N21_R1_comet.idXML"
-    )
-
-    mzml_file = (
-        TESTS_DIR
-        / "test_data"
-        / "dae1cb16fb57893b94bfcb731b2bf7"
-        / "01321_E03_P013560_B00_N21_R1.mzML"
-    )
-
-    annotator = FeatureAnnotator(
-        feature_generators="ms2pip,deeplc",
-                                 only_features="DeepLC:RtDiff,DeepLC:PredictedRetentionTimeBest,Ms2pip:DotProd",
-        ms2_tolerance=0.05,
-        calibration_set_size=0.15,
-        skip_deeplc_retrain=True,
-        processes=2,
-        log_level="INFO",
-        spectrum_id_pattern="(.*)",
-        psm_id_pattern="(.*)",
-    )
-    annotator.build_idxml_data(idxml_file, mzml_file)
-    annotator.annotate()
-
-    output_file = TESTS_DIR / "test_data" / "01321_E03_P013560_B00_N21_R1_rescored.idXML"
-
-    annotator.write_idxml_file(output_file)
-
-
-def test_sage_feature_file():
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "sage2feature",
-            "--idxml",
-            f"{TESTS_DIR}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_sage_ms2rescore.idXML",
-            "--output_file",
-            f"{TESTS_DIR}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_sage_ms2rescore_feat_gen.idXML",
-            "--feat_file",
-            f"{TESTS_DIR}/test_data/tmt_erwinia_1ulsike_top10hcd_isol2_45stepped_60min_01_sage_ms2rescore.idxml.feature_names.tsv",
-        ],
-    )
-
-    assert result.exit_code == 0
+    annotator.write_idparquet_file(output_file)
 
 
 def test_spectrum2feature_file():
     idxml_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_sage_ms2rescore.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet"
     )
     mzml_file = (
         TESTS_DIR / "test_data" / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML"
@@ -267,7 +186,7 @@ def test_spectrum2feature_file():
     output_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_sage_ms2rescore_snr.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_snr.idparquet"
     )
     runner = CliRunner()
     result = runner.invoke(
@@ -276,7 +195,7 @@ def test_spectrum2feature_file():
             "spectrum2feature",
             "--mzml",
             mzml_file,
-            "--idxml",
+            "--idparquet",
             idxml_file,
             "--output",
             output_file,
@@ -309,8 +228,8 @@ def test_local_file():
         cli,
         [
             "msrescore2feature",
-            "--idxml",
-            "{}/UPS1_50amol_R1_comet.idXML".format(local_folder),
+            "--idparquet",
+            "{}/UPS1_50amol_R1_comet.idparquet".format(local_folder),
             "--mzml",
             "{}/UPS1_50amol_R1_converted.mzML".format(local_folder),
             "--processes",
@@ -320,7 +239,7 @@ def test_local_file():
             "--feature_generators",
             "ms2pip,deeplc",
             "--output",
-            "{}/UPS1_50amol_R1_rescored.idXML".format(local_folder),
+            "{}/UPS1_50amol_R1_rescored.idparquet".format(local_folder),
             "--ms2_tolerance",
             "0.05",
         ],
@@ -331,7 +250,7 @@ def test_psm_clean():
     output_file = (
         TESTS_DIR
         / "test_data"
-        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_clean.idXML"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet_clean.idparquet"
     )
 
     runner = CliRunner()
@@ -339,8 +258,8 @@ def test_psm_clean():
         cli,
         [
             "psm_feature_clean",
-            "--idxml",
-            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML".format(
+            "--idparquet",
+            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet".format(
                 TESTS_DIR
             ),
             "--mzml",

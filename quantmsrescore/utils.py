@@ -11,6 +11,8 @@ import pyarrow as pa
 from quantmsrescore.openms import OpenMSHelper
 from datetime import datetime, timezone
 import uuid
+import numpy as np
+from psm_utils import PSM, PSMList
 
 logger = get_logger(__name__)
 
@@ -494,98 +496,50 @@ class ParquetReader:
         self.exp, self.spec_lookup = OpenMSHelper.get_spectrum_lookup_indexer(self._mzml_path)
         logger.info(f"Built SpectrumLookup from {self._mzml_path}")
 
-    def psm_clean(
-            self,
-            remove_missing_spectrum: bool = True,
-            only_ms2: bool = True
-    ) -> SpectrumStats:
+    def validate_psm(self, row, only_ms2, remove_missing_spectrum):
+        spectrum_reference = row.get("spectrum_reference")
+        if spectrum_reference is None:
+            return False
 
-        if self.spec_lookup is None or self.exp is None:
-            raise ValueError("Spectrum lookup not initialized")
+        spectrum = OpenMSHelper.get_spectrum_for_psm(
+            row, self.exp, self.spec_lookup
+        )
 
-        self._stats = SpectrumStats()
+        missing = False
+        empty = False
+        ms_level = 2
 
-        valid_rows = []
-        rebuilt_psms = []
-        unique_spectrum_reference = set()
+        if spectrum is None:
+            self._stats.missing_spectra += 1
+            missing = True
+        else:
+            peaks = spectrum.get_peaks()[0]
 
-        search_engine = self.search_params.get("search_engine", "")
+            if peaks is None or len(peaks) == 0:
+                self._stats.empty_spectra += 1
+                empty = True
 
-        for _, row in self._psms_df.iterrows():
+            ms_level = spectrum.getMSLevel()
+            self._stats.ms_level_counts[ms_level] += 1
+            self._process_dissociation_methods(spectrum, ms_level)
 
-            spectrum_reference = (
-                    row.get("spectrum_ref")
-                    or row.get("spectrum_reference")
-                    or row.get("spectrum_id")
-                    or row.get("scan")
-            )
+        score = row.get("score")
 
-            if spectrum_reference is None:
-                continue
+        if score is None or pd.isna(score) or np.isinf(score):
+            self._stats.invalid_score += 1
+            invalid = True
+        else:
+            invalid = False
 
-            # duplicate check
-            if spectrum_reference in unique_spectrum_reference:
-                self._stats.duplicates_psm += 1
-                continue
+        # filtering
+        if remove_missing_spectrum and (missing or empty or invalid):
+            logger.debug(f"Removing Missing PSM {spectrum_reference}")
+            return False
 
-            unique_spectrum_reference.add(spectrum_reference)
-
-            spectrum = OpenMSHelper.get_spectrum_for_psm(
-                row, self.exp, self.spec_lookup
-            )
-
-            missing = False
-            empty = False
-            ms_level = 2
-
-            if spectrum is None:
-                self._stats.missing_spectra += 1
-                missing = True
-            else:
-                peaks = spectrum.get_peaks()[0]
-
-                if peaks is None or len(peaks) == 0:
-                    self._stats.empty_spectra += 1
-                    empty = True
-
-                ms_level = spectrum.getMSLevel()
-                self._stats.ms_level_counts[ms_level] += 1
-
-            score = row.get("score")
-
-            if score is None or pd.isna(score) or np.isinf(score):
-                self._stats.invalid_score += 1
-                invalid = True
-            else:
-                invalid = False
-
-            # filtering
-            if remove_missing_spectrum and (missing or empty or invalid):
-                continue
-
-            if only_ms2 and ms_level != 2:
-                continue
-
-            valid_rows.append(row)
-
-        # update psms_df
-        self._psms_df = pd.DataFrame(valid_rows)
-
-        # rebuild PSMList
-        for _, row in self._psms_df.iterrows():
-            psm = self._parse_psm(row, self.search_params)
-            if psm:
-                rebuilt_psms.append(psm)
-
-        self._psms = PSMList(rebuilt_psms)
-
-        # update protein / protein group
-        self.rebuild_proteins()
-        self.rebuild_protein_groups()
-
-        self._log_spectrum_statistics()
-
-        return self._stats
+        if only_ms2 and ms_level != 2:
+            logger.debug(f"Removing PSM {spectrum_reference}")
+            return False
+        return True
 
     def _log_spectrum_statistics(self):
         """Log statistics about spectrum validation."""
@@ -669,3 +623,10 @@ class ParquetReader:
             group_index += 1
 
         self._protein_groups_df = pd.DataFrame(groups)
+
+    @staticmethod
+    def get_meta_features(metavalues, key):
+        for metavalue in metavalues:
+            if metavalue["name"] == key:
+                return metavalue["value"]
+        return None

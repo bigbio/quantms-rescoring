@@ -184,7 +184,7 @@ def transfer_learning(
         save_model_dir=save_model_dir,
         log_level=log_level.upper()
     )
-    annotator.build_parquet_data(idparquet, mzml)
+    annotator.build_consensus_idparquet(idparquet, mzml)
     annotator.fine_tune()
 
 
@@ -201,9 +201,7 @@ class AlphaPeptdeepTrainer:
                  force_transfer_learning: bool = False,
                  log_level: str = "INFO"):
         self._idparquet_reader: ParquetRescoringReader = None
-        self._higher_score_better = None
         self.spec_file = None
-        self.psms_df = []
         self._processes = processes
         self._spectrum_id_pattern = spectrum_id_pattern
         self._consider_modloss = consider_modloss
@@ -225,42 +223,12 @@ class AlphaPeptdeepTrainer:
     def _read_idparquet_file(parquet_dir, spectrum_paths):
         # Load the idparquet file and corresponding mzML file
         reader = ParquetRescoringReader(parquet_dir, spectrum_paths)
-        return reader.psms_df
+        return reader
 
     def build_parquet_data(self, idparquet_dir, mzml_path):
 
         logger.info(f"Loading Parquet data: {idparquet_dir}")
-
-        idparquet_dir = Path(idparquet_dir)
-        mzml_path = Path(mzml_path)
-
-        if idparquet_dir.is_dir():
-            parquet_dirs = sorted([p for p in idparquet_dir.iterdir() if p.is_dir()])
-            mzml_files = sorted([f for f in mzml_path.iterdir() if f.suffix == ".mzML"])
-        else:
-            parquet_dirs = [idparquet_dir]
-            mzml_files = [mzml_path]
-
-        self.spec_files = mzml_files
-
-        all_dfs = []
-
-        with ProcessPoolExecutor(max_workers=self._processes) as executor:
-            futures = {
-                executor.submit(self._read_idparquet_file, d, mzml_files): d
-                for d in parquet_dirs
-            }
-
-            for f in as_completed(futures):
-                try:
-                    all_dfs.append(f.result())
-                except Exception as e:
-                    logger.error(f"Failed: {futures[f]} -> {e}")
-                    raise
-
-        self.psms_df = pd.concat(all_dfs, ignore_index=True)
-
-        logger.info(f"Loaded {len(self.psms_df)} PSMs")
+        self._idparquet_reader = self._read_idparquet_file(idparquet_dir, mzml_path)
 
     def fine_tune(self):
         if self._consider_modloss:
@@ -270,8 +238,9 @@ class AlphaPeptdeepTrainer:
         else:
             frag_types = ['b_z1', 'y_z1', 'b_z2', 'y_z2']
 
-        calibration_set = self.psms_df[(~self.psms_df["is_decoy"]) & (self.psms_df["rank"] == 1)]
-        calibration_set.sort_values(by="score", inplace=True, ascending=not self._higher_score_better)
+        psms_df = self._idparquet_reader.psms_df
+        calibration_set = psms_dff[(~psms_df["is_decoy"])]
+        calibration_set.sort_values(by="score", inplace=True, ascending=not self._idparquet_reader.high_score_better)
         precursor_df = calibration_set[:int(len(calibration_set) * self._calibration_set_size)]
         theoretical_mz_df = create_fragment_mz_dataframe(precursor_df, frag_types)
         precursor_df = precursor_df.set_index("provenance_data")

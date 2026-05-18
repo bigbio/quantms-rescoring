@@ -35,7 +35,7 @@ configure_logging()
 @click.option(
     "-o",
     "--output",
-    help="Path the output idxml for the annotated PSMs",
+    help="Path the output idparquet for the annotated PSMs",
 )
 @click.option("--log_level", help="Logging level (default: `info`)", default="info")
 @click.option(

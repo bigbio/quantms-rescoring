@@ -7,6 +7,7 @@ from typing import Optional, Tuple, List, Union, Generator, Dict, Any
 
 from psm_utils import PSMList, PSM
 from quantmsrescore.logging_config import get_logger, configure_worker_process
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from quantmsrescore.openms import (
     OpenMSHelper,
     get_compiled_regex,
@@ -17,7 +18,7 @@ from quantmsrescore.ms2_model_manager import MS2ModelManager
 from ms2rescore.utils import infer_spectrum_path
 import ms2pip.exceptions as exceptions
 import numpy as np
-
+from math import ceil
 from ms2pip._utils.psm_input import read_psms
 from ms2pip.exceptions import NoMatchingSpectraFound
 from ms2pip.result import ProcessingResult
@@ -835,6 +836,8 @@ def ms2_fine_tune(enumerated_psm_list, psms_df, spec_file, spectrum_id_pattern, 
     else:
         frag_types = ['b_z1', 'y_z1', 'b_z2', 'y_z2']
 
+    psms_df.rename(columns={"precursor_charge": "charge"}, inplace=True)
+
     if transfer_learning:
         enumerated_psm_list_copy = enumerated_psm_list.copy()
         # Select only PSMs that are target and not decoys
@@ -925,16 +928,94 @@ def ms2_fine_tune(enumerated_psm_list, psms_df, spec_file, spectrum_id_pattern, 
         "fragment_intensity_df"], predictions["fragment_mz_df"]
 
     results = []
+
     precursor_df = precursor_df.set_index("provenance_data")
+    precursor_dict = precursor_df.to_dict("index")
+    psms_df.rename(columns={"charge": "precursor_charge"}, inplace=True)
 
     b_cols = [col for col in theoretical_mz_df.columns if col.startswith('b')]
     y_cols = [col for col in theoretical_mz_df.columns if col.startswith('y')]
+    b_idx = [theoretical_mz_df.columns.tolist().index(c) for c in b_cols]
+    y_idx = [theoretical_mz_df.columns.tolist().index(c) for c in y_cols]
+
+    # Convert DataFrame once
+    theoretical_mz_df = theoretical_mz_df.values
+    predict_int_df = predict_int_df.values
+
+    # Split by spectrum_id to keep PSMs for same spectrum together
+    def _enumerated_psm_list_by_spectrum_id(psm_list, spectrum_ids_chunk):
+        selected_indices = np.flatnonzero(np.isin(psm_list["spectrum_id"], spectrum_ids_chunk))
+        return [(i, psm_list.psm_list[i]) for i in selected_indices]
+
+    def get_chunk_size(n_items, n_processes):
+        """Get optimal chunk size for multiprocessing."""
+        if n_items < 5000:
+            return n_items
+        max_chunk_size = 50000
+        n_chunks = ceil(ceil(n_items / n_processes) / max_chunk_size) * n_processes
+        return ceil(n_items / n_chunks)
+
+    def to_chunks(_list, chunk_size):
+        """Split _list into chunks of size chunk_size."""
+
+        def _generate_chunks():
+            for i in range(0, len(_list), chunk_size):
+                yield _list[i: i + chunk_size]
+
+        _list = list(_list)
+        return list(_generate_chunks())
+
+    spectrum_ids = set(enumerated_psm_list["spectrum_id"])
+    chunk_size = get_chunk_size(len(spectrum_ids), processes)
+    psm_chunks = [
+        _enumerated_psm_list_by_spectrum_id(enumerated_psm_list, spectrum_ids_chunk)
+        for spectrum_ids_chunk in to_chunks(spectrum_ids, chunk_size)
+    ]
+    logger.info(f"Processing {len(psm_chunks)} chunk(s) of ~{chunk_size} entries each.")
+
+    with ThreadPoolExecutor(max_workers=processes) as executor:
+        futures = [
+            executor.submit(
+                process_psm_chunk,
+                chunk,
+                spec_file,
+                precursor_dict,
+                theoretical_mz_df,
+                predict_int_df,
+                b_idx,
+                y_idx,
+                ms2_tolerance,
+                ms2_tolerance_unit,
+                spectrum_id_pattern,
+            )
+            for chunk in psm_chunks
+        ]
+
+        for future in as_completed(futures):
+            results.extend(future.result())
+
+    return results, model_mgr
+
+
+def process_psm_chunk(
+        psm_chunk,
+        spec_file,
+        precursor_dict,
+        theoretical_mz_np,
+        predict_int_np,
+        b_cols,
+        y_cols,
+        ms2_tolerance,
+        ms2_tolerance_unit,
+        spectrum_id_pattern
+):
+    # Organize PSMs by spectrum ID
 
     # Get cached compiled regex for spectrum ID matching
     spectrum_id_regex = get_compiled_regex(spectrum_id_pattern)
 
-    # Organize PSMs by spectrum ID
-    psms_by_specid = organize_psms_by_spectrum_id(enumerated_psm_list)
+    psms_by_specid = organize_psms_by_spectrum_id(psm_chunk)
+    local_results = []
 
     # Process each spectrum
     for spectrum in read_spectrum_file(spec_file):
@@ -959,21 +1040,26 @@ def ms2_fine_tune(enumerated_psm_list, psms_df, spec_file, spectrum_id_pattern, 
 
         # Process each PSM for this spectrum
         for psm_idx, psm in psms_by_specid[spectrum_id]:
-            row = precursor_df.loc[next(iter(psm.provenance_data.keys()))]
-            mz = theoretical_mz_df.iloc[row["frag_start_idx"]:row["frag_stop_idx"], ]
-            b_array_1d = mz[b_cols].values.flatten()
-            y_array_1d = mz[y_cols].values.flatten()
+            row = precursor_dict[next(iter(psm.provenance_data.keys()))]
+            start_idx = row["frag_start_idx"]
+            stop_idx = row["frag_stop_idx"]
+            mz = theoretical_mz_np[start_idx:stop_idx]
+
+            b_array_1d = mz[:, b_cols].reshape(-1)
+            y_array_1d = mz[:, y_cols].reshape(-1)
+
             b_mask = b_array_1d != 0.0
             y_mask = y_array_1d != 0.0
 
             b_targets, y_targets = _get_targets_for_psm(
                 b_array_1d[b_mask], y_array_1d[y_mask], spectrum, ms2_tolerance, ms2_tolerance_unit
             )
-            predict_intensity = predict_int_df.iloc[row["frag_start_idx"]:row["frag_stop_idx"], ]
-            b_pred = predict_intensity[b_cols].values.flatten()[b_mask]
-            y_pred = predict_intensity[y_cols].values.flatten()[y_mask]
+            predict_intensity = predict_int_np[start_idx:stop_idx]
 
-            results.append(ProcessingResult(
+            b_pred = predict_intensity[:, b_cols].reshape(-1)[b_mask]
+            y_pred = predict_intensity[:, y_cols].reshape(-1)[y_mask]
+
+            local_results.append(ProcessingResult(
                 psm_index=psm_idx,
                 psm=psm,
                 theoretical_mz={"b": b_array_1d[b_mask], "y": y_array_1d[y_mask]},
@@ -983,8 +1069,7 @@ def ms2_fine_tune(enumerated_psm_list, psms_df, spec_file, spectrum_id_pattern, 
                 correlation=None,
                 feature_vectors=None
             ))
-
-    return results, model_mgr
+    return local_results
 
 
 def read_spectrum_file(spec_file: str, use_cache: bool = True) -> Generator[ObservedSpectrum, None, None]:

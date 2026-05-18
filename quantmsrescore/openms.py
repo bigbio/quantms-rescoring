@@ -320,12 +320,12 @@ class OpenMSHelper:
             return None
 
         # -------- 2. parse scan number --------
-        matches = re.findall(r"(?:spectrum|scan)=(\d+)", str(spectrum_reference))
+        matches = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
         if not matches:
             logger.warning(f"Invalid spectrum reference format: {spectrum_reference}")
             return None
 
-        scan_number = int(matches[0])
+        scan_number = int(matches[0][1])
 
         # -------- 3. retrieve spectrum --------
         try:

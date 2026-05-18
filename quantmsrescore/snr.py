@@ -3,10 +3,10 @@ import click
 import numpy as np
 import pandas as pd
 from scipy.stats import entropy
-
+from typing import Optional, Set, Union, DefaultDict
 from quantmsrescore.logging_config import get_logger, configure_logging
 from quantmsrescore.openms import OpenMSHelper
-from quantmsrescore.utils import ParquetReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 
 # init logging
 configure_logging()
@@ -100,10 +100,12 @@ class SpectrumAnalyzer:
 # =========================
 @click.command("spectrum2feature")
 @click.option(
-    "--parquet",
-    type=click.Path(exists=True),
+    "-i",
+    "--idparquet",
+    help="Path to the idparquet containing the PSMs from OpenMS",
     required=True,
-    help="Input parquet directory containing PSMs",
+    type=click.Path(exists=True),
+    multiple=True
 )
 @click.option(
     "--mzml",
@@ -118,7 +120,6 @@ class SpectrumAnalyzer:
     help="Output parquet file",
 )
 def spectrum2feature(parquet, mzml, output):
-
     logger.info(f"[START] spectrum2feature")
     logger.info(f"Input parquet: {parquet}")
     logger.info(f"mzML file: {mzml}")
@@ -126,21 +127,15 @@ def spectrum2feature(parquet, mzml, output):
     # =========================
     # 1. Load Parquet pipeline
     # =========================
-    reader = ParquetReader(parquet)
-
-    # build spectrum lookup index (OpenMS wrapper)
-    reader.build_spectrum_lookup(mzml)
-
-    # load PSM table
-    psms_df = reader._load_parquet(reader.filename / "psms.parquet")
-
-    if psms_df.empty:
-        logger.error("No PSMs found in parquet")
-        raise ValueError("Empty PSM table")
-
-    logger.info(f"Loaded {len(psms_df)} PSMs")
+    idparquet_reader = ParquetRescoringReader(parquet,
+                                              mzml,
+                                              only_ms2=True,
+                                              remove_missing_spectrum=True,
+                                              )
+    psms_df = idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
 
     result_rows = []
+    added_features: Set[str] = set()
 
     # =========================
     # 2. iterate PSMs
@@ -167,8 +162,8 @@ def spectrum2feature(parquet, mzml, output):
         # =========================
         spectrum_data = OpenMSHelper.get_peaks_by_scan(
             scan,
-            reader.exp,
-            reader.spec_lookup,
+            idparquet_reader.exp,
+            idparquet_reader.spec_lookup,
         )
 
         if spectrum_data is None:
@@ -187,27 +182,113 @@ def spectrum2feature(parquet, mzml, output):
             )
 
             record = row.to_dict()
-            record.update(metrics.as_dict())
+            psm_metavalues = record["psm_metavalues"]
 
+            # attach snr features
+            for feature, value in metrics.as_dict().items():
+                if isinstance(value, int):
+                    value_type = "int"
+                elif isinstance(value, float):
+                    value_type = "double"
+                else:
+                    value_type = "string"
+
+                psm_metavalues.append({
+                    "name": feature,
+                    "value": str(value),
+                    "value_type": value_type
+                })
+                added_features.add(feature)
+
+            record["psm_metavalues"] = psm_metavalues
             result_rows.append(record)
 
         except Exception as e:
             logger.error(f"Failed spectrum {scan}: {e}")
             continue
 
+    # Update search parameters with added features
+    try:
+        features_existing = idparquet_reader.get_meta_features(
+            idparquet_reader.search_params["sp_metavalues"],
+            "extra_features"
+        )
+        if features_existing:
+            existing_set = set(features_existing.split(","))
+        else:
+            existing_set = set()
+    except (KeyError, AttributeError, RuntimeError) as e:
+        logger.debug(f"No existing extra_features found: {e}")
+        existing_set = set()
+
+    # Combine existing and new features
+    all_features = existing_set.union(added_features)
+    found = False
+    for mv in idparquet_reader.search_params["sp_metavalues"]:
+        if mv["name"] == "extra_features":
+            mv["value"] = ",".join(sorted(all_features))
+            found = True
+            break
+
+    if not found:
+        idparquet_reader.search_params["sp_metavalues"].append({
+            "name": "extra_features",
+            "value": ",".join(sorted(all_features)),
+            "value_type": "string"
+        })
+
     # =========================
     # 5. output
     # =========================
-    result_df = pd.DataFrame(result_rows)
-
-    logger.info(f"Final valid spectra: {len(result_df)}")
-
-    # save parquet
-    out_file = (
-        output if output.endswith(".parquet")
-        else f"{output}/psms.parquet"
+    idparquet_psm = pa.Table.from_pylist(result_rows, schema=idparquet_reader.psm_schema)
+    idparquet_search_param = pa.Table.from_pylist([idparquet_reader.search_params],
+                                                        schema=idparquet_reader.search_params_schema)
+    idparquet_proteins = pa.Table.from_pandas(
+        idparquet_reader.proteins_df,
+        schema=idparquet_reader.proteins_schema,
+        preserve_index=False
+    )
+    idparquet_protein_groups = pa.Table.from_pylist(
+        idparquet_reader.protein_groups,
+        schema=idparquet_reader.protein_groups_schema
     )
 
-    result_df.to_parquet(out_file, index=False)
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"[DONE] saved to {out_file}")
+    psm_file = output_dir / "psms.parquet"
+    search_param_file = output_dir / "search_params.parquet"
+    proteins_file = output_dir / "proteins.parquet"
+    protein_groups_file = output_dir / "protein_groups.parquet"
+
+    try:
+        out_path = Path(output)
+        pq.write_table(idparquet_psm, psm_file)
+        logger.info(f"psms.parquet file written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_search_param, search_param_file)
+        logger.info(f"search_params.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write search_params.parquet file: {str(e)}")
+        raise
+
+    # proteins.parquet
+    try:
+        pq.write_table(idparquet_proteins, proteins_file)
+        logger.info(f"proteins.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write proteins.parquet file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_protein_groups, protein_groups_file)
+        logger.info(f"protein_groups.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
+        raise

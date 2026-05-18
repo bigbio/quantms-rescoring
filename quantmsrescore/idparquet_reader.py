@@ -1,4 +1,6 @@
 # Get logger for this module
+import os.path
+
 import numpy as np
 from quantmsrescore.logging_config import get_logger
 from quantmsrescore import __version__
@@ -27,17 +29,15 @@ import pyopenms as oms
 from psm_utils import PSM, PSMList
 
 from quantmsrescore.openms import OpenMSHelper
-from quantmsrescore.utils import ParquetReader
+from quantmsrescore.utils import ParquetReader, SpectrumStats
 
 # Patterns to match open and closed round/square brackets
 MOD_PATTERN = re.compile(r"\(((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*)\)")
 MOD_PATTERN_NTERM = re.compile(r"^\.\[((?:[^][]+|\[(?:[^][]+|\[[^][]*\])*\])*)\]")
 MOD_PATTERN_CTERM = re.compile(r"\.\[((?:[^][]+|\[(?:[^][]+|\[[^][]*\])*\])*)\]$")
-
-# 当前 UTC 时间
 now = datetime.now(timezone.utc)
 
-# 生成 run identifier
+# run identifier
 run_identifier = f"quantms-rescoring_{now.strftime('%Y-%m-%d_%H:%M:%S')}"
 
 
@@ -83,13 +83,17 @@ class ParquetRescoringReader(ParquetReader):
 
         self.high_score_better: Optional[bool] = None
         self.search_params: Optional[Dict] = None
+        self.min_msgf_RawScore = np.inf
+        self.max_msgf_EValue = -np.inf
+        self.max_comet_expectation_value = -np.inf
+        self.min_comet_xcorr = np.inf
 
         self._psms: Optional[PSMList] = None
         self._psms_df: Optional[pd.DataFrame] = None
         self._proteins_df: Optional[pd.DataFrame] = None
-        self._protein_groups_df: Optional[pd.DataFrame] = None
+        self._protein_groups: Optional[List[Dict]] = None
 
-        self._build_psm_index()
+        self._build_psm_index(only_ms2=only_ms2, remove_missing_spectrum=remove_missing_spectrum)
         self._build_protein_index()
         self._build_protein_groups_index()
 
@@ -120,15 +124,15 @@ class ParquetRescoringReader(ParquetReader):
         self._proteins_df = proteins_df
 
     @property
-    def protein_groups_df(self) -> Optional[pd.DataFrame]:
-        return self._protein_groups_df
+    def protein_groups(self) -> Optional[List[Dict]]:
+        return self._protein_groups
 
-    @protein_groups_df.setter
-    def protein_groups_df(self, protein_groups_df: pd.DataFrame) -> None:
+    @protein_groups.setter
+    def protein_groups(self, protein_groups: List[Dict]) -> None:
         """Get protein groups DataFrame."""
-        if not isinstance(protein_groups_df, pd.DataFrame):
-            raise TypeError("protein_groups_df must be an instance of DataFrame")
-        self._protein_groups_df = protein_groups_df
+        if not isinstance(protein_groups_df, List):
+            raise TypeError("protein_groups_df must be an instance of List")
+        self._protein_groups = protein_groups
 
     @property
     def spectrum_path(self) -> Optional[Union[str, Path]]:
@@ -141,7 +145,7 @@ class ParquetRescoringReader(ParquetReader):
         Safely get value from row using candidate column names.
         """
         for k in keys:
-            if k in row and pd.notna(row[k]):
+            if k in row:
                 return row[k]
         return default
 
@@ -159,40 +163,94 @@ class ParquetRescoringReader(ParquetReader):
         return sequence
 
     @staticmethod
-    def _extract_modifications(peptidoform: str) -> Tuple[str, str]:
+    def _extract_modifications(modifications):
         """
-        Extract modifications and modification sites.
-
-        Example
-        -------
-        ACDEK[+15.9949]R
-
-        Returns
-        -------
-        mods: Oxidation@M
-        mod_sites: 5
+        Convert OpenMS parquet modification structure into AlphaPeptDeep format.
         """
-        if peptidoform is None:
+
+        # empty input
+        if modifications is None:
             return "", ""
 
-        mods = []
+        # pyarrow may return ndarray
+        if isinstance(modifications, np.ndarray):
+            modifications = modifications.tolist()
+
+        mods_res = []
         mod_sites = []
 
-        # [] modification
-        pattern = re.compile(r"([A-Z])(\[.*?\]|\(.*?\))")
+        # iterate over modifications
+        for mod in modifications:
 
-        for match in pattern.finditer(peptidoform):
-            aa = match.group(1)
-            mod = match.group(2)
+            if not isinstance(mod, dict):
+                continue
 
-            position = match.start(1) + 1
+            # modification name
+            mod_name = mod.get("name")
 
-            mods.append(f"{mod[1:-1]}@{aa}")
-            mod_sites.append(str(position))
+            if mod_name is None:
+                continue
 
-        return ";".join(mods), ";".join(mod_sites)
+            # modification positions
+            positions = mod.get("positions", [])
 
-    def _parse_psm(self, row: pd.Series, search_params: Dict) -> Optional[PSM]:
+            # pyarrow ndarray -> list
+            if isinstance(positions, np.ndarray):
+                positions = positions.tolist()
+
+            # iterate over all modification sites
+            for pos in positions:
+
+                if not isinstance(pos, dict):
+                    continue
+
+                position_str = pos.get("position")
+
+                if not position_str:
+                    continue
+
+                try:
+
+                    # --------------------------------------------------
+                    # Parse position string
+                    #
+                    # Examples:
+                    # M.3
+                    # S.7
+                    # N-term.0
+                    # Protein N-term.0
+                    # C-term.-1
+                    # --------------------------------------------------
+
+                    aa, site = position_str.split(".")
+
+                    # N-terminal modification
+                    if aa in ["N-term", "Protein N-term"]:
+                        mods_res.append(f"{mod_name}@Any_N-term")
+                        mod_sites.append("0")
+
+                        continue
+
+                    # C-terminal modification
+                    if aa in ["C-term", "Protein C-term"]:
+                        mods_res.append(f"{mod_name}@Any_C-term")
+                        mod_sites.append("-1")
+
+                        continue
+
+                    # standard amino acid modification
+                    mods_res.append(f"{mod_name}@{aa}")
+                    mod_sites.append(site)
+
+                except Exception:
+
+                    logger.warning(
+                        f"Cannot parse modification position: {position_str}"
+                    )
+
+        return ";".join(mods_res), ";".join(mod_sites)
+
+    def _parse_psm(self, row: pd.Series) -> Optional[PSM]:
         """
         Convert parquet row to psm_utils.PSM.
         """
@@ -200,10 +258,7 @@ class ParquetRescoringReader(ParquetReader):
         peptide = self._safe_get(
             row,
             [
-                "peptide",
-                "sequence",
-                "peptidoform",
-                "PeptideSequence"
+                "peptidoform"
             ]
         )
 
@@ -213,9 +268,7 @@ class ParquetRescoringReader(ParquetReader):
         charge = self._safe_get(
             row,
             [
-                "charge",
-                "precursor_charge",
-                "Charge"
+                "precursor_charge"
             ],
             0
         )
@@ -223,19 +276,14 @@ class ParquetRescoringReader(ParquetReader):
         spectrum_id = self._safe_get(
             row,
             [
-                "spectrum_ref",
-                "spectrum_reference",
-                "spectrum_id",
-                "scan"
+                "spectrum_reference"
             ]
         )
 
         score = self._safe_get(
             row,
             [
-                "score",
-                "hyperscore",
-                "Score"
+                "score"
             ],
             0.0
         )
@@ -243,8 +291,7 @@ class ParquetRescoringReader(ParquetReader):
         is_decoy = self._safe_get(
             row,
             [
-                "is_decoy",
-                "decoy"
+                "is_decoy"
             ],
             False
         )
@@ -260,24 +307,22 @@ class ParquetRescoringReader(ParquetReader):
         rt = self._safe_get(
             row,
             [
-                "rt",
-                "retention_time"
+                "rt"
             ]
         )
 
         precursor_mz = self._safe_get(
             row,
             [
-                "precursor_mz",
                 "observed_mz"
             ]
         )
-        run_file_name = self._safe_get(
+        run_file_name = os.path.basename(self._safe_get(
             row,
             [
-                "run_file_name"
+                "reference_file_name"
             ]
-        )
+        ))
 
         try:
             peptidoform = self._parse_peptidoform(peptide, charge)
@@ -294,9 +339,6 @@ class ParquetRescoringReader(ParquetReader):
                 retention_time=rt,
                 rank=int(rank),
                 source="parquet",
-                metadata={
-                    "search_engine_name": search_params["search_engine"]
-                },
                 provenance_data={provenance_key: ""},  # We use only the key for provenance
             )
 
@@ -306,34 +348,39 @@ class ParquetRescoringReader(ParquetReader):
             logger.error(f"Failed to parse PSM: {e}")
             return None
 
-    def _build_psm_index(self):
+    def _build_psm_index(self, only_ms2, remove_missing_spectrum):
         """
         Build PSMList and DataFrame.
         """
-
-        merged_psms = {}
-        merged_records = {}
-
         for parquet_dir in self.parquet_dirs:
             search_params = self._load_search_params(parquet_dir)
             if self.search_params is None:
                 self.search_params = search_params
             else:
-                search_params["run_identifier"] = run_identifier
                 search_params["search_engine"] = "quantms-rescoring"
                 search_params["search_engine_version"] = __version__
                 self.search_params.update(search_params)
 
+        self.search_params["run_identifier"] = run_identifier
+
+        merged_psms = {}
+        self._stats = SpectrumStats()
+        instrument = OpenMSHelper.get_instrument(self.exp)
+
+        merged_records = {}
+        spectra_id = set()
+        for parquet_dir in self.parquet_dirs:
             psms_file = parquet_dir / "psms.parquet"
-
             psms_df = self._load_parquet(psms_file)
-
+            search_params = self._load_search_params(parquet_dir)
             if psms_df.empty:
                 continue
 
             for _, row in psms_df.iterrows():
-
-                psm = self._parse_psm(row, search_params)
+                if not self.validate_psm(row, only_ms2=only_ms2, remove_missing_spectrum=remove_missing_spectrum):
+                    continue
+                spectra_id.add(row["spectrum_reference"])
+                psm = self._parse_psm(row)
                 high_score_better = self._safe_get(
                     row,
                     [
@@ -349,32 +396,51 @@ class ParquetRescoringReader(ParquetReader):
                 if psm is None:
                     continue
 
-                peptide = self._safe_get(
+                modifications = self._safe_get(
                     row,
                     [
-                        "peptidoform"
+                        "modifications"
                     ]
                 )
-                mods, mod_sites = self._extract_modifications(peptide)
+                mods, mod_sites = self._extract_modifications(modifications)
 
                 # Start with all original columns
                 record = row.to_dict()
                 # Overwrite/add columns we want to update
+                nce = OpenMSHelper.get_nce_psm(row, self.exp, self.spec_lookup)
+
                 record.update({
                     "mods": mods,
                     "mod_sites": mod_sites,
-                    "unique_hash": next(iter(psm.provenance_data.keys()))
+                    "provenance_data": next(iter(psm.provenance_data.keys())),
+                    "nce": nce,
+                    "instrument": instrument
                 })
 
-                record["charge"] = record.pop("precursor_charge")
-                prov_key = "_".join(next(iter(psm.provenance_data.keys())).split("_")[:2])
+                prov_key = "_".join([row["spectrum_reference"], row["peptidoform"]])
+
                 psm_metavalues = row["psm_metavalues"].tolist()
 
+                if "MS-GF" in search_params["search_engine"]:
+                    msgf_RawScore = float(self.get_meta_features(psm_metavalues, "MS:1002049"))
+                    msgf_EValue = float(record["score"])
+                    if msgf_RawScore < self.min_msgf_RawScore:
+                        self.min_msgf_RawScore = msgf_RawScore
+                    if msgf_EValue > self.max_msgf_EValue:
+                        self.max_msgf_EValue = msgf_EValue
+                else:
+                    comet_xcorr = float(self.get_meta_features(psm_metavalues, "MS:1002252"))
+                    comet_expectation_value = float(record["score"])
+                    if comet_xcorr < self.min_comet_xcorr:
+                        self.min_comet_xcorr = comet_xcorr
+                    if comet_expectation_value > self.max_comet_expectation_value:
+                        self.max_comet_expectation_value = comet_expectation_value
+
                 if prov_key not in merged_psms:
-                    if "Comet" not in search_params["search_engine"]:
+                    if "Comet" not in search_params["search_engine"] and self.search_params["search_engine"] == "quantms-rescoring":
                         psm.score = np.inf
                         record["score"] = np.inf
-                        record["score_type"] = row["score_type"]
+                        record["score_type"] = "expect"
                     merged_psms[prov_key] = copy.copy(psm)
                     record["psm_metavalues"] = psm_metavalues
                     merged_records[prov_key] = copy.copy(record)
@@ -395,6 +461,8 @@ class ParquetRescoringReader(ParquetReader):
 
         self._psms = PSMList(psm_list=list(merged_psms.values()))
         self._psms_df = pd.DataFrame(merged_records.values())
+        self._psms_df["run_identifier"] = run_identifier
+        self._log_spectrum_statistics()
 
     @staticmethod
     def _parse_peptidoform(sequence: str, charge: int) -> str:
@@ -454,7 +522,6 @@ class ParquetRescoringReader(ParquetReader):
                 continue
 
             proteins_df = self._load_parquet(proteins_file)
-
             if proteins_df.empty:
                 continue
 
@@ -470,10 +537,6 @@ class ParquetRescoringReader(ParquetReader):
                     metavalues = metavalues.tolist()
 
                 record["metavalues"] = metavalues
-
-                # update run_identifier
-                record["run_identifier"] = run_identifier
-
                 if accession not in merged_proteins:
                     merged_proteins[accession] = copy.deepcopy(record)
                 else:
@@ -485,6 +548,7 @@ class ParquetRescoringReader(ParquetReader):
                     )
 
         self._proteins_df = pd.DataFrame(merged_proteins.values())
+        self._proteins_df["run_identifier"] = run_identifier
 
     def _build_protein_groups_index(self):
         """
@@ -504,7 +568,6 @@ class ParquetRescoringReader(ParquetReader):
                 continue
 
             protein_groups_df = self._load_parquet(protein_groups_file)
-
             if protein_groups_df.empty:
                 continue
 
@@ -538,7 +601,7 @@ class ParquetRescoringReader(ParquetReader):
                 f"Loaded protein groups from {parquet_dir}"
             )
 
-        self._protein_groups_df = pd.DataFrame(merged_groups)
+        self._protein_groups = merged_groups
 
     def analyze_score_coverage(self) -> Dict[str, ScoreStats]:
 

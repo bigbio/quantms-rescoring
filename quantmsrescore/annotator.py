@@ -6,6 +6,7 @@ from collections import defaultdict
 from psm_utils import PSMList, PSM
 import pyarrow as pa
 import pyarrow.parquet as pq
+import numpy as np
 from quantmsrescore.deeplc import DeepLCAnnotator
 from quantmsrescore.exceptions import Ms2pipIncorrectModelException
 from quantmsrescore.idparquet_reader import ParquetRescoringReader
@@ -201,15 +202,14 @@ class FeatureAnnotator:
     def build_consensus_idparquet(self, parquet_files, spectrum_path):
         try:
             self._idparquet_reader = ParquetRescoringReader(parquet_files,
-                                                        spectrum_path,
-                                                        only_ms2=self._ms2_only,
-                                                        remove_missing_spectrum=self._remove_missing_spectra,
-                                                        )
+                                                            spectrum_path,
+                                                            only_ms2=self._ms2_only,
+                                                            remove_missing_spectrum=self._remove_missing_spectra,
+                                                            )
             self._higher_score_better = self._idparquet_reader.high_score_better
 
             openms_helper = OpenMSHelper()
             decoys, targets = openms_helper.count_decoys_targets(self._idparquet_reader.psms_df)
-
             logger.info(
                 f"Loaded {len(self._idparquet_reader.psms)} PSMs from {parquet_files}: {decoys} decoys and {targets} targets"
             )
@@ -749,52 +749,82 @@ class FeatureAnnotator:
         """
         records = []
         psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idparquet_reader.psms}
-        psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites"])
+        psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
         added_features: Set[str] = set()
 
         for _, record in psms_df.iterrows():
             record = record.to_dict()
-            psm_features = psm_dict.get(record["unique_hash"])
+            psm_features = psm_dict.get(record["provenance_data"])
             psm_metavalues = record["psm_metavalues"]
-            # ⭐ attach rescoring features
-            if hasattr(psm_features, "rescoring_features"):
-                for feature, value in psm_features.rescoring_features.items():
-                    if isinstance(value, int):
-                        value_type = "int"
-                    elif isinstance(value, float):
-                        value_type = "double"
-                    else:
-                        value_type = "string"
 
-                    canonical_feature = OpenMSHelper.get_canonical_feature(feature)
-                    if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
-                        canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
-
-                    if canonical_feature is not None:
-                        if (
-                                self._only_features
-                                and canonical_feature not in self._only_features
-                        ):
-                            continue
-                        added_features.add(canonical_feature)
-
+            if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
                     psm_metavalues.append({
-                        "name": canonical_feature,
-                        "value": str(value),
-                        "value_type": value_type
+                        "name": "MS:1002049",
+                        "value": str(self._idparquet_reader.min_msgf_RawScore),
+                        "value_type": "int"
+                    })
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
+                    psm_metavalues.append({
+                        "name": "MS:1002052",
+                        "value": str(self._idparquet_reader.max_msgf_EValue),
+                        "value_type": "double"
+                    })
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_comet_expectation_value
+                    psm_metavalues.append({
+                        "name": "MS:1002257",
+                        "value": str(record["score"]),
+                        "value_type": "double"
+                    })
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
+                    psm_metavalues.append({
+                        "name": "MS:1002252",
+                        "value": str(self._idparquet_reader.min_comet_xcorr),
+                        "value_type": "double"
                     })
 
+            # attach rescoring features
+            for feature, value in psm_features.rescoring_features.items():
+                if isinstance(value, int):
+                    value_type = "int"
+                elif isinstance(value, float):
+                    value_type = "double"
+                else:
+                    value_type = "string"
+
+                canonical_feature = OpenMSHelper.get_canonical_feature(feature)
+                if canonical_feature is not None and self.ms2_generator == "AlphaPeptDeep":
+                    canonical_feature = canonical_feature.replace("MS2PIP", "AlphaPeptDeep")
+
+                if canonical_feature is not None:
+                    if (
+                            self._only_features
+                            and canonical_feature not in self._only_features
+                    ):
+                        continue
+                    added_features.add(canonical_feature)
+
+                psm_metavalues.append({
+                    "name": canonical_feature,
+                    "value": str(value),
+                    "value_type": value_type
+                })
+
             record["psm_metavalues"] = psm_metavalues
-            record.pop("unique_hash", None)
+            record.pop("provenance_data", None)
             records.append(record)
 
         if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
-            main_scores_features = {"MS:1002049,MS:1002053,MS:1002252,MS:1002257"}
+            main_scores_features = {"MS:1002049,MS:1002052,MS:1002252,MS:1002257"}
             all_features = main_scores_features.union(added_features)
         else:
             # Update search parameters with added features
             try:
-                features_existing = self._idparquet_reader.search_params["extra_features"]
+                features_existing = self._idparquet_reader.get_meta_features(
+                    self._idparquet_reader.search_params["sp_metavalues"],
+                    "extra_features"
+                )
                 if features_existing:
                     existing_set = set(features_existing.split(","))
                 else:
@@ -805,7 +835,21 @@ class FeatureAnnotator:
 
             # Combine existing and new features
             all_features = existing_set.union(added_features)
-        self._idparquet_reader.search_params["extra_features"] = ",".join(sorted(all_features))
+
+        found = False
+        for mv in self._idparquet_reader.search_params["sp_metavalues"]:
+            if mv["name"] == "extra_features":
+                mv["value"] = ",".join(sorted(all_features))
+                found = True
+                break
+
+        if not found:
+            self._idparquet_reader.search_params["sp_metavalues"].append({
+                "name": "extra_features",
+                "value": ",".join(sorted(all_features)),
+                "value_type": "string"
+            })
+
         self._idparquet_psm = pa.Table.from_pylist(records, schema=self._idparquet_reader.psm_schema)
         self._idparquet_search_param = pa.Table.from_pylist([self._idparquet_reader.search_params],
                                                             schema=self._idparquet_reader.search_params_schema)
@@ -814,10 +858,9 @@ class FeatureAnnotator:
             schema=self._idparquet_reader.proteins_schema,
             preserve_index=False
         )
-        self._idparquet_protein_groups = pa.Table.from_pandas(
-            self._idparquet_reader.protein_groups_df,
-            schema=self._idparquet_reader.protein_groups_schema,
-            preserve_index=False
+        self._idparquet_protein_groups = pa.Table.from_pylist(
+            self._idparquet_reader.protein_groups,
+            schema=self._idparquet_reader.protein_groups_schema
         )
 
     def _update_search_parameters(self, features: Set[str]) -> None:
