@@ -1,11 +1,8 @@
 import click
 import pandas as pd
 from pathlib import Path
-import shutil
+
 from quantmsrescore.logging_config import get_logger, configure_logging
-from quantmsrescore.utils import ParquetReader
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 configure_logging()
 logger = get_logger(__name__)
@@ -80,22 +77,9 @@ def add_sage_feature(idparquet: str, output_dir: str, feat_file: str):
     # write back
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # copy original idparquet
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-
-    shutil.copytree(idparquet, output_dir)
-
-    # overwrite updated search_params
-    idparquet_reader = ParquetReader(output_dir)
-    idparquet_search_param = pa.Table.from_pylist(
-        [search_params],
-        schema=idparquet_reader.search_params_schema
-    )
-
-    pq.write_table(
-        idparquet_search_param,
-        output_dir / "search_params.parquet"
+    pd.DataFrame([search_params]).to_parquet(
+        output_dir / "search_params.parquet",
+        index=False
     )
 
     logger.info(f"Saved updated search_params to {output_dir}")

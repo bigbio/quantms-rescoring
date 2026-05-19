@@ -776,12 +776,13 @@ class FeatureAnnotator:
                                                             "double")
 
             psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
+            print(psm_metavalues)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
 
         if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
-            main_scores_features = {"MS:1002049", "MS:1002052", "MS:1002252", "MS:1002257"}
+            main_scores_features = {"MS:1002049,MS:1002052,MS:1002252,MS:1002257"}
             all_features = main_scores_features.union(added_features)
         else:
             # Update search parameters with added features
@@ -860,12 +861,47 @@ class FeatureAnnotator:
                     continue
                 added_features.add(canonical_feature)
 
-                psm_metavalues.append({
-                    "name": canonical_feature,
-                    "value": str(value),
-                    "value_type": value_type
-                })
+            psm_metavalues.append({
+                "name": canonical_feature,
+                "value": str(value),
+                "value_type": value_type
+            })
         return psm_metavalues, added_features
+
+    def _update_search_parameters(self, features: Set[str]) -> None:
+        """
+        Update search parameters with new features.
+
+        Parameters
+        ----------
+        features : Set[str]
+            Set of feature names to add to search parameters.
+        """
+        if not features:
+            return
+
+        logger.info(f"Adding features to search parameters: {', '.join(sorted(features))}")
+
+        # Get search parameters
+        search_parameters = self._idparquet_reader.oms_proteins[0].getSearchParameters()
+
+        # Get existing features
+        try:
+            features_existing = search_parameters.getMetaValue("extra_features")
+            if features_existing:
+                existing_set = set(features_existing.split(","))
+            else:
+                existing_set = set()
+        except (KeyError, AttributeError, RuntimeError) as e:
+            logger.debug(f"No existing extra_features found: {e}")
+            existing_set = set()
+
+        # Combine existing and new features
+        all_features = existing_set.union(features)
+
+        # Update search parameters
+        search_parameters.setMetaValue("extra_features", ",".join(sorted(all_features)))
+        self._idparquet_reader.oms_proteins[0].setSearchParameters(search_parameters)
 
     def _get_top_batch_psms(self, psm_list: PSMList) -> PSMList:
         """

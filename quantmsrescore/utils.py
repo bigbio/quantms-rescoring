@@ -451,7 +451,7 @@ class ParquetReader:
         Load search parameters.
         """
         search_params_file = parquet_dir / "search_params.parquet"
-        if not search_params_file.exists():
+        if not search_params_file:
             return {}
 
         df = self._load_parquet(search_params_file)
