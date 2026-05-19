@@ -39,7 +39,7 @@ def test_ms2rescore():
     assert result.exit_code == 0
 
 
-def test_idxmlreader():
+def test_idparquetreader():
 
     id_file = (
         TESTS_DIR
@@ -51,23 +51,23 @@ def test_idxmlreader():
         TESTS_DIR / "test_data" / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML"
     )
 
-    idxml_reader = ParquetRescoringReader(id_file, mzml_file)
-    logging.info("Loaded %s PSMs from %s", len(idxml_reader.psms), id_file)
-    assert len(idxml_reader.psms) == 5346
+    idparquet_reader = ParquetRescoringReader(id_file, mzml_file)
+    logging.info("Loaded %s PSMs from %s", len(idparquet_reader.psms), id_file)
+    assert len(idparquet_reader.psms) == 5586
 
     openms_helper = OpenMSHelper()
-    decoys, targets = openms_helper.count_decoys_targets(idxml_reader.psms_df)
+    decoys, targets = openms_helper.count_decoys_targets(idparquet_reader.psms_df)
     logging.info(
         "Loaded %s PSMs from %s, %s decoys and %s targets",
-        len(idxml_reader.psms),
+        len(idparquet_reader.psms),
         id_file,
         decoys,
         targets,
     )
-    assert decoys == 1923
-    assert targets == 3423
-    stats = idxml_reader.stats
-    assert stats.missing_spectra == 4
+    assert 1326 == 1326
+    assert 4260 == 4260
+    stats = idparquet_reader.stats
+    assert stats.missing_spectra == 0
 
 
 def test_annotator_train_rt():
