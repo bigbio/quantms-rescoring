@@ -206,12 +206,12 @@ def update_search_parameter(idparquet_reader, added_features):
     required=True,
     help="Output parquet file",
 )
-def spectrum2feature(parquet, mzml, output):
+def spectrum2feature(idparquet, mzml, output):
     logger.info("[START] spectrum2feature")
-    logger.info(f"Input parquet: {parquet}")
+    logger.info(f"Input parquet: {idparquet}")
     logger.info(f"mzML file: {mzml}")
 
-    idparquet_reader = ParquetRescoringReader(parquet,
+    idparquet_reader = ParquetRescoringReader(idparquet,
                                               mzml,
                                               only_ms2=True,
                                               remove_missing_spectrum=True,
