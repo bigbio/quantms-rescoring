@@ -13,7 +13,6 @@ from quantmsrescore.alphapeptdeep import read_spectrum_file, _get_targets_df_for
 from alphabase.peptide.fragment import create_fragment_mz_dataframe
 from quantmsrescore.ms2_model_manager import MS2ModelManager
 import pandas as pd
-import re
 import ms2pip.exceptions as exceptions
 
 # Get logger for this module
@@ -22,7 +21,7 @@ logger = get_logger(__name__)
 
 @click.command(
     "transfer_learning",
-    short_help="Annotate PSMs in an idXML file using ms2rescore features.",
+    short_help="Annotate PSMs in an idparquet file using ms2rescore features.",
 )
 @click.option(
     "-i",
@@ -120,7 +119,7 @@ def transfer_learning(
         log_level,
 ):
     """
-    Annotate PSMs in an idXML file with additional features using specified models.
+    Annotate PSMs in an idparquet file with additional features using specified models.
 
     This command-line interface (CLI) command processes a PSM file by adding
     annotations from the MS²PIP and DeepLC models, among others, while preserving
@@ -237,8 +236,8 @@ class AlphaPeptdeepTrainer:
                 break
 
         if spectrum_path is None:
-            logger.error(
-                "Missing mzML for idparquet: {}".format(parquet_dir)
+            raise FileNotFoundError(
+                f"Missing mzML for idparquet: {parquet_dir}"
             )
 
         reader = ParquetRescoringReader(parquet_dir, spectrum_path)
@@ -263,8 +262,8 @@ class AlphaPeptdeepTrainer:
                                 "Inconsistent high_score_better across files"
                             )
                     except Exception as e:
-                        idxml_file = future_to_file[future]
-                        logger.error(f"Error processing file: {idxml_file, e}")
+                        idparquet_file = future_to_file[future]
+                        logger.error(f"Error processing file: {idparquet_file, e}")
                         executor.shutdown(wait=False, cancel_futures=True)
                         raise
 
