@@ -56,20 +56,17 @@ jobs:
         CUDA_VISIBLE_DEVICES: "-1"
       run: |
         wget https://ftp.pride.ebi.ac.uk/pub/databases/pride/resources/proteomes/quantms-ci-github/quantms-utils/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML
-        wget https://ftp.pride.ebi.ac.uk/pub/databases/pride/resources/proteomes/quantms-ci-github/quantms-utils/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML
-        wget https://ftp.pride.ebi.ac.uk/pub/databases/pride/resources/proteomes/quantms-ci-github/quantms-utils/191126_AMLM_THY01-DN4_Thymus_Tue39L243_10_DDA_2_400-1000mz_msms40_standard.mzML
-        wget https://ftp.pride.ebi.ac.uk/pub/databases/pride/resources/proteomes/quantms-ci-github/quantms-utils/191126_AMLM_THY01-DN4_Thymus_Tue39L243_10_DDA_2_400-1000mz_msms40_standard_comet.idXML
     - name: Test ms2pip ms2rescore
       env:
         CUDA_VISIBLE_DEVICES: "-1"
       run: |
-        rescoring msrescore2feature --idxml TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idXML --mzml TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML --processes 2 --feature_generators 'ms2pip,deeplc'
+        rescoring msrescore2feature --idparquet tests/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet --mzml TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML --processes 2 --feature_generators 'ms2pip,deeplc'
     
     - name: Test alphapeptdeep ms2rescore
       env:
         CUDA_VISIBLE_DEVICES: "-1"
       run: |
-        rescoring msrescore2feature --idxml 191126_AMLM_THY01-DN4_Thymus_Tue39L243_10_DDA_2_400-1000mz_msms40_standard_comet.idXML --mzml 191126_AMLM_THY01-DN4_Thymus_Tue39L243_10_DDA_2_400-1000mz_msms40_standard.mzML --processes 8 -o test3.idXML --feature_generators 'alphapeptdeep'
+        rescoring msrescore2feature --idparquet tests/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet --mzml TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML --processes 8 -o test3.idparquet --feature_generators 'alphapeptdeep'
       
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v5

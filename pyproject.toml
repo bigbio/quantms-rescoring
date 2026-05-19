@@ -3,7 +3,7 @@ name = "quantms-rescoring"
 description = "quantms-rescoring: Python scripts and helpers for the quantMS workflow"
 readme = "README.md"
 license = "MIT"
-version = "0.0.16"
+version = "0.0.17"
 authors = [
     "Yasset Perez-Riverol <ypriverol@gmail.com>",
     "Dai Chengxin <chengxin2024@126.com>",
@@ -14,7 +14,10 @@ keywords = [
     "proteomics",
     "mass-spectrometry",
     "data-analysis",
-    "big data"
+    "big data",
+    "psm-rescoring",
+    "ms2rescore",
+    "peptide-identification"
 ]
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -29,27 +32,29 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.12"
+python = ">3.9,<3.12"
 click = "*"
 pyopenms = "3.4.0"
-ms2rescore = "3.2.0.post1"
+ms2rescore = "3.2.1"
 pandas = "*"
 numpy = ">=1.25"
 psm-utils = "*"
-deepLC = ">=3.0"
+deepLC = "3.1.13"
 scipy = "*"
 pygam = "*"
 protobuf= "*"
-ms2pip = ">=4.0"
+ms2pip = "4.1.2"
 peptdeep = "1.4.1"
 torch = "<2.10.0"
+pyarrow = "*"
 psutil = "*"  # For memory-aware process count in HPC environments
 
 [tool.poetry.urls]
+Homepage = "https://quantms.org"
+Documentation = "https://docs.quantms.org"
 GitHub = "https://github.com/bigbio/quantms-rescoring"
-PyPi = "https://pypi.org/project/quantms-rescoring/"
-Quantms = "https://quantms.org"
-LICENSE = "https://github.com/bigbio/quantms-rescoring/blob/main/LICENSE"
+"Bug Tracker" = "https://github.com/bigbio/quantms-rescoring/issues"
+PyPI = "https://pypi.org/project/quantms-rescoring/"
 
 [tool.poetry.scripts]
 rescoring = "quantmsrescore.rescoring:main"

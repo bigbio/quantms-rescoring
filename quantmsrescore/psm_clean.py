@@ -12,67 +12,128 @@ filterwarnings(
     module="pyopenms",
 )
 
-
-
 import click
-
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pathlib import Path
 from quantmsrescore.logging_config import configure_logging
-from quantmsrescore.utils import IdXMLReader
+from quantmsrescore.idparquet_reader import ParquetRescoringReader
 
-# Configure logging with default settings
 configure_logging()
 
 
 @click.command(
     "psm_feature_clean",
-    short_help="Annotate PSMs in an idXML file using ms2rescore features.",
+    short_help="Clean PSMs in parquet using spectrum-based filtering.",
 )
 @click.option(
     "-i",
-    "--idxml",
-    help="Path to the idxml containing the PSMs from OpenMS",
+    "--idparquet",
+    help="Path to the idparquet containing the PSMs from OpenMS",
     required=True,
     type=click.Path(exists=True),
+    multiple=True
 )
 @click.option(
     "-s",
     "--mzml",
-    help="Path to the mzML file containing the spectra use for identification",
+    help="Path to mzML file",
     required=True,
     type=click.Path(exists=True),
 )
 @click.option(
     "-o",
     "--output",
-    help="Path the output idxml for the processed PSMs",
+    help="Output parquet file",
+    required=True,
+    type=click.Path(),
 )
-@click.pass_context
 def psm_feature_clean(
-    ctx,
-    idxml: str,
+    idparquet: str,
     mzml: str,
     output: str,
 ):
     """
-    Annotate PSMs in an idXML file with additional features using specified models.
+    Clean PSMs from parquet input using:
+    - spectrum existence check
+    - MS2 filtering
+    - invalid score removal
+    - duplicate removal
 
-    This command-line interface (CLI) command processes a PSM file by remove invalid PSMs
-
-    Parameters
-    ----------
-
-    ctx : click.Context
-        The Click context object.
-    idxml : str
-        Path to the idXML file containing the PSMs.
-    mzml : str
-        Path to the mzML file containing the mass spectrometry.
-    output : str
-        Path to the output idXML file with processed PSMs.
+    Also rebuild:
+    - protein table
+    - protein group table
     """
 
-    id_reader = IdXMLReader(idxml)
-    id_reader.build_spectrum_lookup(mzml, check_unix_compatibility=True)
-    id_reader.psm_clean()
-    id_reader.write_idxml_file(output)
+    logger.info("[START] PSM feature clean (parquet mode)")
+    logger.info(f"Input: {idparquet}")
+    logger.info(f"mzML: {mzml}")
 
+    # =========================
+    # 1. Load parquet reader
+    # =========================
+    idparquet_reader = ParquetRescoringReader(idparquet,
+                                              mzml,
+                                              only_ms2=True,
+                                              remove_missing_spectrum=True,
+                                              )
+    # =========================
+    # 5. Save parquet output
+    # =========================
+    # =========================
+    # 5. output
+    # =========================
+    psms_df = idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
+
+    idparquet_psm = pa.Table.from_pandas(psms_df, schema=idparquet_reader.psm_schema)
+    idparquet_search_param = pa.Table.from_pylist([idparquet_reader.search_params],
+                                                  schema=idparquet_reader.search_params_schema)
+    idparquet_proteins = pa.Table.from_pandas(
+        idparquet_reader.proteins_df,
+        schema=idparquet_reader.proteins_schema,
+        preserve_index=False
+    )
+    idparquet_protein_groups = pa.Table.from_pylist(
+        idparquet_reader.protein_groups,
+        schema=idparquet_reader.protein_groups_schema
+    )
+
+    output_dir = Path(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    psm_file = output_dir / "psms.parquet"
+    search_param_file = output_dir / "search_params.parquet"
+    proteins_file = output_dir / "proteins.parquet"
+    protein_groups_file = output_dir / "protein_groups.parquet"
+
+    try:
+        out_path = Path(output)
+        pq.write_table(idparquet_psm, psm_file)
+        logger.info(f"psms.parquet file written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_search_param, search_param_file)
+        logger.info(f"search_params.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write search_params.parquet file: {str(e)}")
+        raise
+
+    # proteins.parquet
+    try:
+        pq.write_table(idparquet_proteins, proteins_file)
+        logger.info(f"proteins.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write proteins.parquet file: {str(e)}")
+        raise
+
+    # search_params.parquet
+    try:
+        pq.write_table(idparquet_protein_groups, protein_groups_file)
+        logger.info(f"protein_groups.parquet written to {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
+        raise
