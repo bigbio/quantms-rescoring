@@ -45,19 +45,34 @@ def add_sage_feature(idparquet: str, output_dir: str, feat_file: str):
     # assume single-row search params
     search_params = search_df.iloc[0].to_dict()
 
-    old_features = search_params.get("extra_features", "")
+    # Update search parameters with added features
+    try:
+        features_existing = search_params["sp_metavalues"]["extra_features"]
+        if features_existing:
+            existing_set = set(features_existing.split(","))
+        else:
+            existing_set = set()
+    except (KeyError, AttributeError, RuntimeError) as e:
+        logger.debug(f"No existing extra_features found: {e}")
+        existing_set = set()
 
-    if isinstance(old_features, str) and old_features:
-        new_features = old_features.split(",") + extra_feat
-    else:
-        new_features = extra_feat
+    # Combine existing and new features
+    all_features = existing_set.union(set(extra_feat))
+    found = False
+    for mv in search_params["sp_metavalues"]:
+        if mv["name"] == "extra_features":
+            mv["value"] = ",".join(sorted(all_features))
+            found = True
+            break
 
-    # deduplicate
-    new_features = list(dict.fromkeys(new_features))
+    if not found:
+        search_params["sp_metavalues"].append({
+            "name": "extra_features",
+            "value": ",".join(sorted(all_features)),
+            "value_type": "string"
+        })
 
-    search_params["extra_features"] = ",".join(new_features)
-
-    logger.info(f"Updated extra_features: {len(new_features)} features")
+    logger.info(f"Updated extra_features: {len(extra_feat)} features")
 
     # write back
     output_dir.mkdir(parents=True, exist_ok=True)

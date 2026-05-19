@@ -407,13 +407,6 @@ class OpenMSHelper:
             return -1
 
     @staticmethod
-    def get_psm_hash_unique_id(row: dict) -> str:
-        """
-        Generate unique PSM key from parquet row.
-        """
-        return f"{row.get('spectrum_ref')}_{row.get('sequence')}_{row.get('retention_time')}_{row.get('charge')}_{row.get('rank')}"
-
-    @staticmethod
     def get_str_metavalue_round(metavalue: float):
         """
         Get a string representation of a metadata value, rounded to 4 decimal places.

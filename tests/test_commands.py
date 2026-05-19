@@ -64,8 +64,8 @@ def test_idparquetreader():
         decoys,
         targets,
     )
-    assert 1326 == 1326
-    assert 4260 == 4260
+    assert decoys == 1326
+    assert targets == 4260
     stats = idparquet_reader.stats
     assert stats.missing_spectra == 0
 

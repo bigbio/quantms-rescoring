@@ -576,50 +576,6 @@ class ParquetReader:
                 else:
                     logger.warning(f"Unknown dissociation method index {method_index}")
 
-    def rebuild_proteins(self):
-
-        protein_hits = defaultdict(set)
-
-        for _, row in self._psms_df.iterrows():
-
-            proteins = row.get("proteins", [])
-            peptide = row.get("peptidoform")
-
-            if proteins is None:
-                continue
-
-            if isinstance(proteins, str):
-                proteins = [proteins]
-
-            for p in proteins:
-                protein_hits[p].add(peptide)
-
-        self._proteins_df = pd.DataFrame([
-            {
-                "accession": prot,
-                "n_peptides": len(peps),
-                "peptides": list(peps)
-            }
-            for prot, peps in protein_hits.items()
-        ])
-
-    def rebuild_protein_groups(self):
-
-        groups = []
-        group_index = 0
-
-        for _, row in self._proteins_df.iterrows():
-            groups.append({
-                "group_index": group_index,
-                "accessions": [row["accession"]],
-                "n_proteins": 1,
-                "n_peptides": row.get("n_peptides", 0)
-            })
-
-            group_index += 1
-
-        self._protein_groups_df = pd.DataFrame(groups)
-
     @staticmethod
     def get_meta_features(metavalues, key):
         for metavalue in metavalues:

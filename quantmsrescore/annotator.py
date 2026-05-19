@@ -226,10 +226,10 @@ class FeatureAnnotator:
         Raises
         ------
         ValueError
-            If no idXML data is loaded.
+            If no idparquet data is loaded.
         """
         if not self._idparquet_reader:
-            raise ValueError("No idXML data loaded. Call build_consensus_idparquet first.")
+            raise ValueError("No idparquet data loaded. Call build_consensus_idparquet first.")
 
         logger.debug(f"Running annotations with configuration: {self.__dict__}")
 
@@ -776,6 +776,7 @@ class FeatureAnnotator:
                                                             "double")
 
             psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
+            print(psm_metavalues)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)

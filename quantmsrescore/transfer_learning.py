@@ -290,6 +290,7 @@ class AlphaPeptdeepTrainer:
         else:
             frag_types = ['b_z1', 'y_z1', 'b_z2', 'y_z2']
 
+        # Default hit rank=1
         calibration_set = self.psms_df[(~self.psms_df["is_decoy"])]
         calibration_set.sort_values(by="score", inplace=True, ascending=not self.high_score_better)
         precursor_df = calibration_set[:int(len(calibration_set) * self._calibration_set_size)]

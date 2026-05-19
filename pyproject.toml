@@ -32,7 +32,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.12"
+python = ">3.9,<3.12"
 click = "*"
 pyopenms = "3.4.0"
 ms2rescore = "3.2.1"
@@ -46,6 +46,7 @@ protobuf= "*"
 ms2pip = "4.1.2"
 peptdeep = "1.4.1"
 torch = "<2.10.0"
+pyarrow = "*"
 psutil = "*"  # For memory-aware process count in HPC environments
 
 [tool.poetry.urls]

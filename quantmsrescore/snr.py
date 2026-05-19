@@ -118,9 +118,8 @@ def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_protei
     protein_groups_file = output_dir / "protein_groups.parquet"
 
     try:
-        out_path = Path(output)
         pq.write_table(idparquet_psm, psm_file)
-        logger.info(f"psms.parquet file written to {out_path}")
+        logger.info(f"psms.parquet file written to {psm_file}")
     except Exception as e:
         logger.error(f"Failed to write psms.parquet psm file: {str(e)}")
         raise
@@ -128,7 +127,7 @@ def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_protei
     # search_params.parquet
     try:
         pq.write_table(idparquet_search_param, search_param_file)
-        logger.info(f"search_params.parquet written to {out_path}")
+        logger.info(f"search_params.parquet written to {search_param_file}")
     except Exception as e:
         logger.error(f"Failed to write search_params.parquet file: {str(e)}")
         raise
@@ -136,7 +135,7 @@ def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_protei
     # proteins.parquet
     try:
         pq.write_table(idparquet_proteins, proteins_file)
-        logger.info(f"proteins.parquet written to {out_path}")
+        logger.info(f"proteins.parquet written to {proteins_file}")
     except Exception as e:
         logger.error(f"Failed to write proteins.parquet file: {str(e)}")
         raise
@@ -144,7 +143,7 @@ def write_idparquet_file(idparquet_psm, idparquet_search_param, idparquet_protei
     # search_params.parquet
     try:
         pq.write_table(idparquet_protein_groups, protein_groups_file)
-        logger.info(f"protein_groups.parquet written to {out_path}")
+        logger.info(f"protein_groups.parquet written to {protein_groups_file}")
     except Exception as e:
         logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
         raise
@@ -259,17 +258,10 @@ def spectrum2feature(idparquet, mzml, output):
 
             # attach snr features
             for feature, value in metrics.as_dict().items():
-                if isinstance(value, int):
-                    value_type = "int"
-                elif isinstance(value, float):
-                    value_type = "double"
-                else:
-                    value_type = "string"
-
                 psm_metavalues.append({
                     "name": feature,
                     "value": str(value),
-                    "value_type": value_type
+                    "value_type": "string"
                 })
                 added_features.add(feature)
 
@@ -278,7 +270,6 @@ def spectrum2feature(idparquet, mzml, output):
 
         except Exception as e:
             logger.error(f"Failed spectrum {scan}: {e}")
-            continue
 
     idparquet_reader = update_search_parameter(idparquet_reader, added_features)
 
