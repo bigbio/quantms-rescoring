@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 from quantmsrescore import configure_threading, configure_torch_threads
 from quantmsrescore.idparquet_reader import ParquetRescoringReader
 from quantmsrescore.logging_config import get_logger
-from quantmsrescore.openms import get_compiled_regex
+from quantmsrescore.openms import OpenMSHelper, get_compiled_regex
 from quantmsrescore.alphapeptdeep import read_spectrum_file, _get_targets_df_for_psm
 from alphabase.peptide.fragment import create_fragment_mz_dataframe
 from quantmsrescore.ms2_model_manager import MS2ModelManager
