@@ -425,7 +425,8 @@ class ParquetRescoringReader(ParquetReader):
                     "mod_sites": mod_sites,
                     "provenance_data": next(iter(psm.provenance_data.keys())),
                     "nce": nce,
-                    "instrument": instrument
+                    "instrument": instrument,
+                    "reference_file_name": os.path.basename(record["reference_file_name"])
                 })
 
                 prov_key = "_".join([row["spectrum_reference"], row["peptidoform"]])
