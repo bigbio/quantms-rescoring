@@ -98,6 +98,8 @@ class ParquetRescoringReader(ParquetReader):
         self.max_msgf_EValue = -np.inf
         self.max_comet_expectation_value = -np.inf
         self.min_comet_xcorr = np.inf
+        self.min_sage_hyperscore = np.inf
+        self.merge_search_engines = []  # Comet > MSGF > Sage
 
         self._psms: Optional[PSMList] = None
         self._psms_df: Optional[pd.DataFrame] = None
@@ -353,13 +355,13 @@ class ParquetRescoringReader(ParquetReader):
         """Build PSMList and DataFrame."""
         for parquet_dir in self.parquet_dirs:
             search_params = self._load_search_params(parquet_dir)
+            self.merge_search_engines.append(search_params["search_engine"])
             if self.search_params is None:
                 self.search_params = search_params
             else:
                 search_params["search_engine"] = "quantms-rescoring"
                 search_params["search_engine_version"] = __version__
                 self.search_params.update(search_params)
-
         self.search_params["run_identifier"] = run_identifier
 
         merged_psms = {}
@@ -384,11 +386,23 @@ class ParquetRescoringReader(ParquetReader):
                         "higher_score_better"
                     ]
                 )
-
-                if self.high_score_better is None:
-                    self.high_score_better = high_score_better
-                elif self.high_score_better != high_score_better:
-                    logger.warning("Inconsistent score direction found in parquet file")
+                if "Comet" in self.merge_search_engines:
+                    if search_params["search_engine"] == "Comet":
+                        if self.high_score_better is None:
+                            self.high_score_better = high_score_better
+                        elif self.high_score_better != high_score_better:
+                            logger.warning("Inconsistent score direction found in parquet file")
+                elif "MS-GF+" in self.merge_search_engines:
+                    if search_params["search_engine"] == "MS-GF+":
+                        if self.high_score_better is None:
+                            self.high_score_better = high_score_better
+                        elif self.high_score_better != high_score_better:
+                            logger.warning("Inconsistent score direction found in parquet file")
+                else:
+                    if self.high_score_better is None:
+                        self.high_score_better = high_score_better
+                    elif self.high_score_better != high_score_better:
+                        logger.warning("Inconsistent score direction found in parquet file")
 
                 if psm is None:
                     continue
@@ -411,23 +425,32 @@ class ParquetRescoringReader(ParquetReader):
                     "mod_sites": mod_sites,
                     "provenance_data": next(iter(psm.provenance_data.keys())),
                     "nce": nce,
-                    "instrument": instrument
+                    "instrument": instrument,
+                    "reference_file_name": os.path.basename(record["reference_file_name"])
                 })
 
                 prov_key = "_".join([row["spectrum_reference"], row["peptidoform"]])
-
                 psm_metavalues = row["psm_metavalues"].tolist()
                 self.get_default_scores(search_params, psm_metavalues, record)
                 if prov_key not in merged_psms:
-                    if "Comet" not in search_params["search_engine"] and self.search_params["search_engine"] == "quantms-rescoring":
-                        psm.score = np.inf
-                        record["score"] = np.inf
-                        record["score_type"] = "expect"
+                    if len(set(self.merge_search_engines)) > 1:
+                        if "Comet" not in search_params["search_engine"] and "Comet" in self.merge_search_engines:
+                            psm.score = np.inf
+                            record["score"] = np.inf
+                            record["score_type"] = "expect"
+                        elif "MS-GF+" not in search_params["search_engine"] and "MS-GF+" in self.merge_search_engines:
+                            psm.score = np.inf
+                            record["score"] = np.inf
+                            record["score_type"] = "SpecEValue"
                     merged_psms[prov_key] = copy.copy(psm)
                     record["psm_metavalues"] = psm_metavalues
                     merged_records[prov_key] = copy.copy(record)
                 else:
                     if search_params["search_engine"] == "Comet":
+                        merged_psms[prov_key].score = psm.score
+                        merged_records[prov_key]["score"] = psm.score
+                        merged_records[prov_key]["score_type"] = row["score_type"]
+                    elif "Comet" not in self.merge_search_engines and search_params["search_engine"] == "MS-GF+":
                         merged_psms[prov_key].score = psm.score
                         merged_records[prov_key]["score"] = psm.score
                         merged_records[prov_key]["score_type"] = row["score_type"]
@@ -447,13 +470,17 @@ class ParquetRescoringReader(ParquetReader):
         self._log_spectrum_statistics()
 
     def get_default_scores(self, search_params, psm_metavalues, record):
-        if "MS-GF" in search_params["search_engine"]:
+        if "MS-GF+" in search_params["search_engine"]:
             msgf_RawScore = float(self.get_meta_features(psm_metavalues, "MS:1002049"))
             msgf_EValue = float(record["score"])
             if msgf_RawScore < self.min_msgf_RawScore:
                 self.min_msgf_RawScore = msgf_RawScore
             if msgf_EValue > self.max_msgf_EValue:
                 self.max_msgf_EValue = msgf_EValue
+        elif "Sage" in search_params["search_engine"]:
+            sage_hyperscore = float(record["score"])
+            if sage_hyperscore < self.min_sage_hyperscore:
+                self.min_sage_hyperscore = sage_hyperscore
         else:
             comet_xcorr = float(self.get_meta_features(psm_metavalues, "MS:1002252"))
             comet_expectation_value = float(record["score"])

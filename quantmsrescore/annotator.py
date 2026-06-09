@@ -749,39 +749,18 @@ class FeatureAnnotator:
         psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idparquet_reader.psms}
         psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
         added_features: Set[str] = set()
-
+        main_scores_features: Set[str] = set()
         for _, record in psms_df.iterrows():
             record = record.to_dict()
             psm_features = psm_dict.get(record["provenance_data"])
             psm_metavalues = record["psm_metavalues"]
-
-            if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
-                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
-                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
-                                                            str(self._idparquet_reader.min_msgf_RawScore),
-                                                            "int")
-
-                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
-                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
-                                                            str(self._idparquet_reader.max_msgf_EValue),
-                                                            "double")
-                if np.isinf(record["score"]):
-                    record["score"] = self._idparquet_reader.max_comet_expectation_value
-                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002257",
-                                                            str(record["score"]),
-                                                            "double")
-                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
-                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002252",
-                                                            str(self._idparquet_reader.min_comet_xcorr),
-                                                            "double")
-
+            record, psm_metavalues, main_scores_features = self.fill_search_scores(record, psm_metavalues)
             psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
 
-        if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
-            main_scores_features = {"MS:1002049", "MS:1002052", "MS:1002252", "MS:1002257"}
+        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
             all_features = main_scores_features.union(added_features)
         else:
             # Update search parameters with added features
@@ -866,6 +845,54 @@ class FeatureAnnotator:
                     "value_type": value_type
                 })
         return psm_metavalues, added_features
+
+    def fill_search_scores(self, record, psm_metavalues):
+        main_scores_features = set()
+        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
+            if "Comet" in self._idparquet_reader.merge_search_engines:
+                main_scores_features = main_scores_features.union({"MS:1002252", "MS:1002257"})
+                if "MS-GF+" in self._idparquet_reader.merge_search_engines:
+                    main_scores_features = main_scores_features.union({"MS:1002049", "MS:1002052"})
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                                str(self._idparquet_reader.min_msgf_RawScore),
+                                                                "int")
+
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                                str(self._idparquet_reader.max_msgf_EValue),
+                                                                "double")
+                if "Sage" in self._idparquet_reader.merge_search_engines:
+                    main_scores_features.add("ln(hyperscore)")
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                                str(self._idparquet_reader.min_sage_hyperscore),
+                                                                "double")
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_comet_expectation_value
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002257",
+                                                            str(record["score"]),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002252",
+                                                            str(self._idparquet_reader.min_comet_xcorr),
+                                                            "double")
+            else:
+                main_scores_features = {"MS:1002049", "MS:1002052", "ln(hyperscore)"}
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_msgf_EValue
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                            str(record["score"]),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                            str(self._idparquet_reader.min_msgf_RawScore),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                            str(self._idparquet_reader.min_sage_hyperscore),
+                                                            "double")
+        return record, psm_metavalues, main_scores_features
 
     def _get_top_batch_psms(self, psm_list: PSMList) -> PSMList:
         """
