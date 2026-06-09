@@ -15,6 +15,8 @@ filterwarnings(
 import click
 import pyarrow as pa
 import pyarrow.parquet as pq
+import numpy as np
+from typing import Set
 from pathlib import Path
 from quantmsrescore.logging_config import configure_logging
 from quantmsrescore.idparquet_reader import ParquetRescoringReader
@@ -49,9 +51,9 @@ configure_logging()
     type=click.Path(),
 )
 def psm_feature_clean(
-    idparquet: str,
-    mzml: str,
-    output: str,
+        idparquet: str,
+        mzml: str,
+        output: str,
 ):
     """
     Clean PSMs from parquet input using:
@@ -85,9 +87,41 @@ def psm_feature_clean(
     # =========================
     psms_df = idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
 
-    idparquet_psm = pa.Table.from_pandas(psms_df, schema=idparquet_reader.psm_schema)
+    if len(idparquet) > 1:
+        # merge score
+        main_scores_features: Set[str] = set()
+        records = []
+
+        for _, record in psms_df.iterrows():
+            record = record.to_dict()
+            psm_metavalues = record["psm_metavalues"]
+            record, psm_metavalues, main_scores_features = fill_search_scores(idparquet_reader,
+                                                                              record,
+                                                                              psm_metavalues)
+            record["psm_metavalues"] = psm_metavalues
+            record.pop("provenance_data", None)
+            records.append(record)
+
+        found = False
+        for mv in idparquet_reader.search_params["sp_metavalues"]:
+            if mv["name"] == "extra_features":
+                mv["value"] = ",".join(sorted(main_scores_features))
+                found = True
+                break
+
+        if not found:
+            idparquet_reader.search_params["sp_metavalues"].append({
+                "name": "extra_features",
+                "value": ",".join(sorted(main_scores_features)),
+                "value_type": "string"
+            })
+        idparquet_psm = pa.Table.from_pylist(records, schema=idparquet_reader.psm_schema)
+    else:
+        idparquet_psm = pa.Table.from_pandas(psms_df, schema=idparquet_reader.psm_schema)
+
     idparquet_search_param = pa.Table.from_pylist([idparquet_reader.search_params],
                                                   schema=idparquet_reader.search_params_schema)
+
     idparquet_proteins = pa.Table.from_pandas(
         idparquet_reader.proteins_df,
         schema=idparquet_reader.proteins_schema,
@@ -137,3 +171,62 @@ def psm_feature_clean(
     except Exception as e:
         logger.error(f"Failed to write protein_groups.parquet file: {str(e)}")
         raise
+
+
+def fill_search_scores(idparquet_reader, record, psm_metavalues):
+    main_scores_features = set()
+    if idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+        if "Comet" in idparquet_reader.merge_search_engines:
+            main_scores_features = main_scores_features.union({"MS:1002252", "MS:1002257"})
+            if "MS-GF+" in idparquet_reader.merge_search_engines:
+                main_scores_features = main_scores_features.union({"MS:1002049", "MS:1002052"})
+                if not idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                    psm_metavalues = add_search_scores(psm_metavalues, "MS:1002049",
+                                                            str(idparquet_reader.min_msgf_RawScore),
+                                                            "int")
+
+                if not idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
+                    psm_metavalues = add_search_scores(psm_metavalues, "MS:1002052",
+                                                            str(idparquet_reader.max_msgf_EValue),
+                                                            "double")
+            if "Sage" in idparquet_reader.merge_search_engines:
+                main_scores_features.add("ln(hyperscore)")
+                if not idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                    psm_metavalues = add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                            str(idparquet_reader.min_sage_hyperscore),
+                                                            "double")
+            if np.isinf(record["score"]):
+                record["score"] =idparquet_reader.max_comet_expectation_value
+                psm_metavalues = add_search_scores(psm_metavalues, "MS:1002257",
+                                                        str(record["score"]),
+                                                        "double")
+            if not idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
+                psm_metavalues = add_search_scores(psm_metavalues, "MS:1002252",
+                                                        str(idparquet_reader.min_comet_xcorr),
+                                                        "double")
+        else:
+            main_scores_features = {"MS:1002049", "MS:1002052", "ln(hyperscore)"}
+            if np.isinf(record["score"]):
+                record["score"] = idparquet_reader.max_msgf_EValue
+                psm_metavalues = add_search_scores(psm_metavalues, "MS:1002052",
+                                                        str(record["score"]),
+                                                        "double")
+            if not idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                psm_metavalues = add_search_scores(psm_metavalues, "MS:1002049",
+                                                        str(idparquet_reader.min_msgf_RawScore),
+                                                        "double")
+            if not idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                psm_metavalues = add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                        str(idparquet_reader.min_sage_hyperscore),
+                                                        "double")
+    return record, psm_metavalues, main_scores_features
+
+
+def add_search_scores(psm_metavalues, name, value, value_type):
+    """Add key-value pairs to the metavalue."""
+    psm_metavalues.append({
+        "name": name,
+        "value": value,
+        "value_type": value_type
+    })
+    return psm_metavalues
