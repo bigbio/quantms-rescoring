@@ -760,7 +760,7 @@ class FeatureAnnotator:
             record.pop("provenance_data", None)
             records.append(record)
 
-        if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
             all_features = main_scores_features.union(added_features)
         else:
             # Update search parameters with added features
@@ -848,7 +848,7 @@ class FeatureAnnotator:
 
     def fill_search_scores(self, record, psm_metavalues):
         main_scores_features = set()
-        if self._idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
             if "Comet" in self._idparquet_reader.merge_search_engines:
                 main_scores_features = main_scores_features.union({"MS:1002252", "MS:1002257"})
                 if "MS-GF+" in self._idparquet_reader.merge_search_engines:

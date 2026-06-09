@@ -175,7 +175,7 @@ def psm_feature_clean(
 
 def fill_search_scores(idparquet_reader, record, psm_metavalues):
     main_scores_features = set()
-    if idparquet_reader.search_params["search_engine"] == "quantms-rescoring":
+    if len(set(idparquet_reader.merge_search_engines)) > 1:
         if "Comet" in idparquet_reader.merge_search_engines:
             main_scores_features = main_scores_features.union({"MS:1002252", "MS:1002257"})
             if "MS-GF+" in idparquet_reader.merge_search_engines:
