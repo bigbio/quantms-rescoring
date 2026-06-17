@@ -434,11 +434,11 @@ class ParquetRescoringReader(ParquetReader):
                 self.get_default_scores(search_params, psm_metavalues, record)
                 if prov_key not in merged_psms:
                     if len(set(self.merge_search_engines)) > 1:
-                        if "Comet" not in search_params["search_engine"] and "Comet" in self.merge_search_engines:
+                        if "Comet" in self.merge_search_engines and search_params["search_engine"] != "Comet":
                             psm.score = np.inf
                             record["score"] = np.inf
                             record["score_type"] = "expect"
-                        elif "MS-GF+" not in search_params["search_engine"] and "MS-GF+" in self.merge_search_engines:
+                        elif "MS-GF+" in self.merge_search_engines and "Comet" not in self.merge_search_engines and search_params["search_engine"] != "MS-GF+":
                             psm.score = np.inf
                             record["score"] = np.inf
                             record["score_type"] = "SpecEValue"
