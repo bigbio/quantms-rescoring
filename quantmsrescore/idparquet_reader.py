@@ -353,15 +353,22 @@ class ParquetRescoringReader(ParquetReader):
 
     def _build_psm_index(self, only_ms2, remove_missing_spectrum):
         """Build PSMList and DataFrame."""
+        search_params_mapper = dict()
         for parquet_dir in self.parquet_dirs:
             search_params = self._load_search_params(parquet_dir)
             self.merge_search_engines.append(search_params["search_engine"])
-            if self.search_params is None:
-                self.search_params = search_params
-            else:
-                search_params["search_engine"] = "quantms-rescoring"
-                search_params["search_engine_version"] = __version__
-                self.search_params.update(search_params)
+            search_params_mapper[search_params["search_engine"]] = search_params
+
+        if "Comet" in self.merge_search_engines:
+            self.search_params = search_params_mapper["Comet"]
+        elif "MS-GF+" in self.merge_search_engines:
+            self.search_params = search_params_mapper["MS-GF+"]
+        else:
+            self.search_params = search_params_mapper["Sage"]
+        if len(self.merge_search_engines) > 1:
+            self.search_params["search_engine"] = "quantms-consensus-rescoring"
+            self.search_params["search_engine_version"] = __version__
+
         self.search_params["run_identifier"] = run_identifier
 
         merged_psms = {}
