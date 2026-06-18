@@ -363,9 +363,11 @@ class ParquetRescoringReader(ParquetReader):
             self.search_params = search_params_mapper["Comet"]
         elif "MS-GF+" in self.merge_search_engines:
             self.search_params = search_params_mapper["MS-GF+"]
-        else:
+        elif "Sage" in self.merge_search_engines:
             self.search_params = search_params_mapper["Sage"]
-        if len(self.merge_search_engines) > 1:
+        else:
+            self.search_params = next(iter(search_params_mapper.values()))
+        if len(set(self.merge_search_engines)) > 1:
             self.search_params["search_engine"] = "quantms-consensus-rescoring"
             self.search_params["search_engine_version"] = __version__
 
