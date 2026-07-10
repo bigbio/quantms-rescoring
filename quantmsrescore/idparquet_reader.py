@@ -354,10 +354,16 @@ class ParquetRescoringReader(ParquetReader):
     def _build_psm_index(self, only_ms2, remove_missing_spectrum):
         """Build PSMList and DataFrame."""
         search_params_mapper = dict()
+        engine_by_dir = dict()
         for parquet_dir in self.parquet_dirs:
             search_params = self._load_search_params(parquet_dir)
             self.merge_search_engines.append(search_params["search_engine"])
             search_params_mapper[search_params["search_engine"]] = search_params
+            engine_by_dir[parquet_dir] = search_params["search_engine"]
+
+        # Sort parquet_dirs by engine priority: Comet > MS-GF+ > Sage > others
+        engine_priority = {"Comet": 0, "MS-GF+": 1, "Sage": 2}
+        self.parquet_dirs.sort(key=lambda d: engine_priority.get(engine_by_dir[d], 3))
 
         if "Comet" in self.merge_search_engines:
             self.search_params = search_params_mapper["Comet"]
