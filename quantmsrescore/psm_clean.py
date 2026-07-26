@@ -87,6 +87,13 @@ def psm_feature_clean(
     # =========================
     psms_df = idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
 
+    # For a two-engine (comet + msgf) merge the reader already built the union
+    # Percolator feature table (worst-case imputation + engine-source
+    # indicators) and recorded it in extra_features, so the primary-score fill
+    # below must not run and must not collapse extra_features back to the four
+    # raw scores.
+    consensus_applied = idparquet_reader.consensus_features_applied
+
     if len(idparquet) > 1:
         # merge score
         main_scores_features: Set[str] = set()
@@ -95,26 +102,28 @@ def psm_feature_clean(
         for _, record in psms_df.iterrows():
             record = record.to_dict()
             psm_metavalues = record["psm_metavalues"]
-            record, psm_metavalues, main_scores_features = fill_search_scores(idparquet_reader,
-                                                                              record,
-                                                                              psm_metavalues)
+            if not consensus_applied:
+                record, psm_metavalues, main_scores_features = fill_search_scores(idparquet_reader,
+                                                                                  record,
+                                                                                  psm_metavalues)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
 
-        found = False
-        for mv in idparquet_reader.search_params["sp_metavalues"]:
-            if mv["name"] == "extra_features":
-                mv["value"] = ",".join(sorted(main_scores_features))
-                found = True
-                break
+        if not consensus_applied:
+            found = False
+            for mv in idparquet_reader.search_params["sp_metavalues"]:
+                if mv["name"] == "extra_features":
+                    mv["value"] = ",".join(sorted(main_scores_features))
+                    found = True
+                    break
 
-        if not found:
-            idparquet_reader.search_params["sp_metavalues"].append({
-                "name": "extra_features",
-                "value": ",".join(sorted(main_scores_features)),
-                "value_type": "string"
-            })
+            if not found:
+                idparquet_reader.search_params["sp_metavalues"].append({
+                    "name": "extra_features",
+                    "value": ",".join(sorted(main_scores_features)),
+                    "value_type": "string"
+                })
         idparquet_psm = pa.Table.from_pylist(records, schema=idparquet_reader.psm_schema)
     else:
         idparquet_psm = pa.Table.from_pandas(psms_df, schema=idparquet_reader.psm_schema)

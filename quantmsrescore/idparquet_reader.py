@@ -25,6 +25,7 @@ filterwarnings(
 
 from psm_utils import PSM, PSMList
 
+from quantmsrescore import consensus_features
 from quantmsrescore.openms import OpenMSHelper
 from quantmsrescore.utils import ParquetReader, SpectrumStats
 
@@ -100,6 +101,10 @@ class ParquetRescoringReader(ParquetReader):
         self.min_comet_xcorr = np.inf
         self.min_sage_hyperscore = np.inf
         self.merge_search_engines = []  # Comet > MSGF > Sage
+        # True once the two-engine (comet + msgf) consensus feature union has
+        # been built for this run; downstream writers (annotator,
+        # psm_feature_clean) must then not re-impute / collapse the features.
+        self.consensus_features_applied = False
 
         self._psms: Optional[PSMList] = None
         self._psms_df: Optional[pd.DataFrame] = None
@@ -482,7 +487,97 @@ class ParquetRescoringReader(ParquetReader):
         self._psms = PSMList(psm_list=list(merged_psms.values()))
         self._psms_df = pd.DataFrame(merged_records.values())
         self._psms_df["run_identifier"] = run_identifier
+
+        # Two-engine (comet + msgf) consensus merge: build the union Percolator
+        # feature table (rich per-engine features + orientation-aware worst-case
+        # imputation + engine-source indicators) so BOTH the ms2features-off path
+        # (psm_feature_clean -> this reader) and the ms2features-on path
+        # (annotator) produce an engine-aware, non-collapsed representation.
+        # The curated feature orientations only cover Comet and MS-GF+, so any
+        # other engine combination keeps the primary-score fill implemented in
+        # ``fill_search_scores``.
+        if self._is_comet_msgf_merge():
+            self._apply_consensus_features()
+            self.consensus_features_applied = True
+
         self._log_spectrum_statistics()
+
+    def _is_comet_msgf_merge(self) -> bool:
+        """True for a merged run whose engines are exactly Comet + MS-GF+."""
+        return len(self.parquet_dirs) > 1 and set(self.merge_search_engines) == {"Comet", "MS-GF+"}
+
+    def _apply_consensus_features(self) -> None:
+        """Add the union feature set + worst-case imputation + engine indicators
+        to every merged PSM and record it in ``extra_features``.
+
+        Runs two passes over the merged metavalues: the first accumulates the
+        per-feature worst-case from genuinely-present values, the second imputes
+        the missing engine's features and appends the always-defined indicators.
+        The score-direction sentinel (``score == inf`` for msgf-only PSMs) is also
+        resolved here to the worst comet expectation value so the ms2features-off
+        path never writes an infinite score.
+        """
+        if self._psms_df is None or self._psms_df.empty:
+            return
+        metavalue_col = self._psms_df["psm_metavalues"]
+
+        # Pass 1: worst-case per feature from real (pre-imputation) values.
+        worst: Dict[str, float] = {}
+        for mvs in metavalue_col:
+            consensus_features.update_worst_case(mvs, worst)
+
+        comet_expect_fallback = (
+            self.max_comet_expectation_value
+            if np.isfinite(self.max_comet_expectation_value)
+            else worst.get("MS:1002257", 0.0)
+        )
+
+        # Pass 2: impute missing-engine features + indicators; fix inf score.
+        new_metavalues = []
+        scores = self._psms_df["score"].tolist() if "score" in self._psms_df else None
+        fixed_scores = []
+        for idx, mvs in enumerate(metavalue_col):
+            comet_present, msgf_present = consensus_features.detect_engine_sources(mvs)
+            mvs = consensus_features.build_consensus_features(
+                mvs, worst, comet_present=comet_present, msgf_present=msgf_present
+            )
+            new_metavalues.append(mvs)
+            if scores is not None:
+                s = scores[idx]
+                fixed_scores.append(comet_expect_fallback if (s is None or not np.isfinite(s)) else s)
+        self._psms_df["psm_metavalues"] = new_metavalues
+        if scores is not None:
+            self._psms_df["score"] = fixed_scores
+
+        self._set_extra_features(consensus_features.union_feature_names())
+
+    def _set_extra_features(self, feature_names) -> None:
+        """Union ``feature_names`` into the ``extra_features`` search parameter."""
+        sp_metavalues = self.search_params.get("sp_metavalues", [])
+        if sp_metavalues is None:
+            sp_metavalues = []
+        elif not isinstance(sp_metavalues, list):
+            sp_metavalues = sp_metavalues.tolist()
+
+        existing: set = set()
+        for mv in sp_metavalues:
+            if isinstance(mv, dict) and mv.get("name") == "extra_features" and mv.get("value"):
+                existing = set(str(mv["value"]).split(","))
+                break
+        all_features = existing | set(feature_names)
+
+        found = False
+        for mv in sp_metavalues:
+            if isinstance(mv, dict) and mv.get("name") == "extra_features":
+                mv["value"] = ",".join(sorted(all_features))
+                found = True
+                break
+        if not found:
+            sp_metavalues.append(
+                {"name": "extra_features", "value": ",".join(sorted(all_features)),
+                 "value_type": "string"}
+            )
+        self.search_params["sp_metavalues"] = sp_metavalues
 
     def get_default_scores(self, search_params, psm_metavalues, record):
         if "MS-GF+" in search_params["search_engine"]:
