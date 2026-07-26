@@ -749,35 +749,48 @@ class FeatureAnnotator:
         psm_dict = {next(iter(psm.provenance_data)): psm for psm in self._idparquet_reader.psms}
         psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
         added_features: Set[str] = set()
-
+        main_scores_features: Set[str] = set()
+        # For the two-engine (comet + msgf) consensus merge the feature union,
+        # the orientation-aware worst-case imputation of the missing engine and
+        # the engine-source indicators are already built once, up front, by
+        # ParquetRescoringReader._apply_consensus_features (so the
+        # ms2features-off psm_feature_clean path is fixed too). In that case we
+        # only layer the ms2 rescoring features (MS2PIP/DeepLC/...) on top.
+        # Every other merged combination (e.g. anything involving Sage) still
+        # goes through the primary-score fill implemented on dev.
+        consensus_applied = self._idparquet_reader.consensus_features_applied
         for _, record in psms_df.iterrows():
             record = record.to_dict()
             psm_features = psm_dict.get(record["provenance_data"])
             psm_metavalues = record["psm_metavalues"]
-
-            # The two-engine (comet + msgf) consensus feature union, worst-case
-            # imputation of the missing engine and engine-source indicators are
-            # built once, up front, by ParquetRescoringReader._apply_consensus_features
-            # (so the ms2features-off psm_feature_clean path is fixed too). Here we
-            # only layer the ms2 rescoring features (MS2PIP/DeepLC/...) on top.
+            if not consensus_applied:
+                record, psm_metavalues, main_scores_features = self.fill_search_scores(record, psm_metavalues)
             psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
 
-        # Union the newly added ms2 features into the existing extra_features
-        # (the reader already recorded the search-engine / consensus feature set).
-        try:
-            features_existing = self._idparquet_reader.get_meta_features(
-                self._idparquet_reader.search_params["sp_metavalues"],
-                "extra_features"
-            )
-            existing_set = set(features_existing.split(",")) if features_existing else set()
-        except (KeyError, AttributeError, RuntimeError) as e:
-            logger.debug(f"No existing extra_features found: {e}")
-            existing_set = set()
+        if not consensus_applied and len(set(self._idparquet_reader.merge_search_engines)) > 1:
+            all_features = main_scores_features.union(added_features)
+        else:
+            # Union the newly added ms2 features into the existing extra_features.
+            # For a consensus (comet + msgf) run the reader already recorded the
+            # union feature set there; for a single-engine run this preserves the
+            # search engine's own extra_features.
+            try:
+                features_existing = self._idparquet_reader.get_meta_features(
+                    self._idparquet_reader.search_params["sp_metavalues"],
+                    "extra_features"
+                )
+                if features_existing:
+                    existing_set = set(features_existing.split(","))
+                else:
+                    existing_set = set()
+            except (KeyError, AttributeError, RuntimeError) as e:
+                logger.debug(f"No existing extra_features found: {e}")
+                existing_set = set()
 
-        all_features = existing_set.union(added_features)
+            all_features = existing_set.union(added_features)
 
         found = False
         for mv in self._idparquet_reader.search_params["sp_metavalues"]:
@@ -844,6 +857,54 @@ class FeatureAnnotator:
                     "value_type": value_type
                 })
         return psm_metavalues, added_features
+
+    def fill_search_scores(self, record, psm_metavalues):
+        main_scores_features = set()
+        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
+            if "Comet" in self._idparquet_reader.merge_search_engines:
+                main_scores_features = main_scores_features.union({"MS:1002252", "MS:1002257"})
+                if "MS-GF+" in self._idparquet_reader.merge_search_engines:
+                    main_scores_features = main_scores_features.union({"MS:1002049", "MS:1002052"})
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                                str(self._idparquet_reader.min_msgf_RawScore),
+                                                                "int")
+
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002052"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                                str(self._idparquet_reader.max_msgf_EValue),
+                                                                "double")
+                if "Sage" in self._idparquet_reader.merge_search_engines:
+                    main_scores_features.add("ln(hyperscore)")
+                    if not self._idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                        psm_metavalues = self.add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                                str(self._idparquet_reader.min_sage_hyperscore),
+                                                                "double")
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_comet_expectation_value
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002257",
+                                                            str(record["score"]),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002252"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002252",
+                                                            str(self._idparquet_reader.min_comet_xcorr),
+                                                            "double")
+            else:
+                main_scores_features = {"MS:1002049", "MS:1002052", "ln(hyperscore)"}
+                if np.isinf(record["score"]):
+                    record["score"] = self._idparquet_reader.max_msgf_EValue
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002052",
+                                                            str(record["score"]),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "MS:1002049"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "MS:1002049",
+                                                            str(self._idparquet_reader.min_msgf_RawScore),
+                                                            "double")
+                if not self._idparquet_reader.get_meta_features(psm_metavalues, "ln(hyperscore)"):
+                    psm_metavalues = self.add_search_scores(psm_metavalues, "ln(hyperscore)",
+                                                            str(self._idparquet_reader.min_sage_hyperscore),
+                                                            "double")
+        return record, psm_metavalues, main_scores_features
 
     def _get_top_batch_psms(self, psm_list: PSMList) -> PSMList:
         """

@@ -273,6 +273,52 @@ def test_psm_clean():
     assert result.exit_code == 0
 
 
+def test_psm_clean_multi_engine():
+    """
+    Test psm_feature_clean with two search engines (Comet + MS-GF+).
+    Verify that merge is order-independent and produces finite scores.
+    Regression test for the order-dependent merge bug where Comet-first
+    ordering incorrectly set scores to np.inf.
+    """
+    output_file = (
+        TESTS_DIR
+        / "test_data"
+        / "TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_merged_clean.idparquet"
+    )
+
+    # Comet idparquet first — this was the buggy ordering
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "psm_feature_clean",
+            "--idparquet",
+            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_comet.idparquet".format(
+                TESTS_DIR
+            ),
+            "--idparquet",
+            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01_msgf.idparquet".format(
+                TESTS_DIR
+            ),
+            "--mzml",
+            "{}/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01.mzML".format(
+                TESTS_DIR
+            ),
+            "--output",
+            output_file,
+        ],
+    )
+    assert result.exit_code == 0
+
+    # Verify all scores are finite (not np.inf)
+    import pyarrow.parquet as pq
+    psms = pq.read_table(output_file / "psms.parquet")
+    scores = psms.column("score").to_pylist()
+    valid_scores = [s for s in scores if s is not None]
+    assert len(valid_scores) > 0, "All scores are None"
+    assert all(s != float("inf") for s in valid_scores), "Some scores are infinity (merge bug)"
+
+
 def test_download_models_help():
     """Test that download_models command is accessible and shows help."""
     runner = CliRunner()

@@ -231,7 +231,7 @@ class AlphaPeptdeepTrainer:
         runs = psms_df["reference_file_name"].unique()
         spectrum_path = None
         for mzml_file in spectrum_paths:
-            if os.path.basename(mzml_file) == runs[0]:
+            if os.path.basename(mzml_file) == os.path.basename(runs[0]):
                 spectrum_path = mzml_file
                 break
 
