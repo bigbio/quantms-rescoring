@@ -101,9 +101,9 @@ class ParquetRescoringReader(ParquetReader):
         self.min_comet_xcorr = np.inf
         self.min_sage_hyperscore = np.inf
         self.merge_search_engines = []  # Comet > MSGF > Sage
-        # True once the two-engine (comet + msgf) consensus feature union has
-        # been built for this run; downstream writers (annotator,
-        # psm_feature_clean) must then not re-impute / collapse the features.
+        # True once the multi-engine consensus feature union has actually been
+        # built for this run; downstream writers (annotator, psm_feature_clean)
+        # must then not re-impute / collapse the features.
         self.consensus_features_applied = False
 
         self._psms: Optional[PSMList] = None
@@ -493,12 +493,16 @@ class ParquetRescoringReader(ParquetReader):
         # imputation + engine-source indicators) so BOTH the ms2features-off path
         # (psm_feature_clean -> this reader) and the ms2features-on path
         # (annotator) produce an engine-aware, non-collapsed representation.
-        # The curated feature orientations only cover Comet and MS-GF+, so any
-        # other engine combination keeps the primary-score fill implemented in
-        # ``fill_search_scores``.
+        # Any merge whose engines are all in the consensus registry gets the union
+        # treatment; a combination containing an unregistered engine keeps the
+        # primary-score fill implemented in ``fill_search_scores``.
+        #
+        # The flag must reflect whether the transform actually ran: it is what
+        # tells ``psm_clean`` to skip ``fill_search_scores`` AND to skip writing
+        # extra_features. Setting it unconditionally would, for an empty PSM
+        # frame, suppress both and emit no extra_features at all.
         if self._is_supported_consensus_merge():
-            self._apply_consensus_features()
-            self.consensus_features_applied = True
+            self.consensus_features_applied = self._apply_consensus_features()
         elif len(self.parquet_dirs) > 1:
             unknown = sorted(set(self.merge_search_engines) - consensus_features.supported_engines())
             logger.warning(
@@ -526,7 +530,7 @@ class ParquetRescoringReader(ParquetReader):
             self.merge_search_engines
         )
 
-    def _apply_consensus_features(self) -> None:
+    def _apply_consensus_features(self) -> bool:
         """Add the union feature set + worst-case imputation + engine indicators
         to every merged PSM and record it in ``extra_features``.
 
@@ -538,7 +542,7 @@ class ParquetRescoringReader(ParquetReader):
         path never writes an infinite score.
         """
         if self._psms_df is None or self._psms_df.empty:
-            return
+            return False
         metavalue_col = self._psms_df["psm_metavalues"]
 
         engines = list(self.merge_search_engines)
@@ -571,6 +575,7 @@ class ParquetRescoringReader(ParquetReader):
         self._set_extra_features(
             consensus_features.union_feature_names(orientation, engine_labels=engines)
         )
+        return True
 
     def _sentinel_score_fallback(self, engines, worst) -> float:
         """Finite replacement for the ``score == inf`` sentinel on PSMs that the

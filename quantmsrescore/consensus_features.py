@@ -429,6 +429,14 @@ def build_consensus_features(
     the missing engines' features, so it must not be used as a presence signal).
     """
     labels = list(presence) if presence else (list(engine_labels) if engine_labels else None)
+    # Derive the orientation from the configured engines when the caller did not
+    # supply one. Without this, asking for e.g. ("Comet","MS-GF+","Sage") while
+    # omitting `orientation` emitted the CONSENSUS:sage indicator but imputed
+    # only the default Comet/MS-GF+ union, leaving every Sage feature declared in
+    # extra_features yet undefined on non-Sage PSMs -- the exact missing-value
+    # defect this module exists to prevent.
+    if orientation is None and labels:
+        orientation = union_feature_orientation(labels)
     if presence is None:
         detected = detect_engines(psm_metavalues, engine_labels=labels)
         presence = dict(detected)

@@ -314,3 +314,46 @@ class TestSageIndicators:
         names = CF.union_feature_names()
         assert "CONSENSUS:sage" not in names
         assert not any(n.startswith("SAGE:") for n in names)
+
+
+class TestOrientationDefaultsFollowEngineLabels:
+    """Regression: build_consensus_features must not emit an engine's indicator
+    while leaving that engine's features undefined.
+
+    Passing engine_labels without an explicit orientation used to fall back to
+    the Comet/MS-GF+ default union, so a three-engine call emitted
+    CONSENSUS:sage but imputed no SAGE feature -- every SAGE name ended up
+    declared in extra_features yet missing on non-SAGE PSMs, which is the
+    missing-value defect the module exists to prevent.
+    """
+
+    def test_engine_labels_alone_impute_that_engines_features(self):
+        orientation = CF.union_feature_orientation(ALL_THREE)
+        worst = {}
+        for mvs in (COMET_ONLY, MSGF_ONLY, SAGE_ONLY):
+            CF.update_worst_case(mvs, worst, orientation)
+
+        # NOTE: orientation deliberately omitted -- derived from engine_labels.
+        out = CF.build_consensus_features(list(COMET_ONLY), worst, engine_labels=ALL_THREE)
+        names = {m["name"] for m in out}
+        declared = CF.union_feature_names(engine_labels=ALL_THREE)
+        assert declared.issubset(names), declared - names
+
+    def test_presence_alone_also_derives_orientation(self):
+        orientation = CF.union_feature_orientation(ALL_THREE)
+        worst = {}
+        for mvs in (COMET_ONLY, MSGF_ONLY, SAGE_ONLY):
+            CF.update_worst_case(mvs, worst, orientation)
+        presence = CF.detect_engines(COMET_ONLY, engine_labels=ALL_THREE)
+        out = CF.build_consensus_features(list(COMET_ONLY), worst, presence=presence)
+        names = {m["name"] for m in out}
+        assert CF.union_feature_names(engine_labels=ALL_THREE).issubset(names)
+
+    def test_no_labels_still_defaults_to_two_engine_union(self):
+        worst = {}
+        for mvs in (COMET_ONLY, MSGF_ONLY):
+            CF.update_worst_case(mvs, worst)
+        out = CF.build_consensus_features(list(COMET_ONLY), worst)
+        names = {m["name"] for m in out}
+        assert CF.union_feature_names().issubset(names)
+        assert not any(n.startswith("SAGE:") for n in names)
