@@ -327,6 +327,15 @@ def update_worst_case(
             value = float(raw)
         except (TypeError, ValueError):
             continue
+        # ``float()`` happily parses "inf"/"-inf"/"nan", and a single degenerate
+        # metavalue (e.g. a -inf log-transformed score) would otherwise become
+        # THE worst-case constant and be written onto every missing-engine PSM.
+        # NaN is worse still: min()/max() propagate it depending on argument
+        # order, so one NaN can poison the accumulator for the whole run. The
+        # reader's np.isfinite repair only guards the `score` column, not
+        # features, so this is the only place it can be caught.
+        if value != value or value in (float("inf"), float("-inf")):
+            continue
         if higher_better is None:
             lo_key, hi_key = name + _MIN_SUFFIX, name + _MAX_SUFFIX
             lo = min(worst.get(lo_key, value), value)

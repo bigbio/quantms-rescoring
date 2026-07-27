@@ -294,7 +294,7 @@ def download_alphapeptdeep_models(model_dir: Optional[Path] = None) -> None:
 )
 @click.option(
     "--models",
-    help="Comma-separated list of models to download: ms2pip, alphapeptdeep (default: all)",
+    help="Comma-separated list of models to download: ms2pip, alphapeptdeep (default: ms2pip,alphapeptdeep)",
     default="ms2pip,alphapeptdeep",
 )
 def download_models(model_dir: Optional[str], log_level: str, models: str) -> None:

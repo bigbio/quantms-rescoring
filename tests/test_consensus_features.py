@@ -357,3 +357,59 @@ class TestOrientationDefaultsFollowEngineLabels:
         names = {m["name"] for m in out}
         assert CF.union_feature_names().issubset(names)
         assert not any(n.startswith("SAGE:") for n in names)
+
+
+class TestNonFiniteValuesAreRejected:
+    """Regression: float() parses "inf"/"-inf"/"nan", so a single degenerate
+    metavalue could become THE worst-case constant and be written onto every
+    missing-engine PSM. NaN was worse -- min()/max() propagate it depending on
+    argument order, so one NaN could poison the accumulator for a whole run.
+    The reader's np.isfinite repair only guards the `score` column, never
+    features, so update_worst_case is the only place this can be caught.
+    """
+
+    def test_negative_inf_does_not_become_the_worst_case(self):
+        worst = {}
+        CF.update_worst_case([_mv("COMET:xcorr", "2.0")], worst)
+        CF.update_worst_case([_mv("COMET:xcorr", "-inf")], worst)
+        assert worst["COMET:xcorr"] == 2.0
+
+    def test_positive_inf_ignored_for_lower_is_better(self):
+        worst = {}
+        CF.update_worst_case([_mv("MS:1002052", "1e-12")], worst)
+        CF.update_worst_case([_mv("MS:1002052", "inf")], worst)
+        assert worst["MS:1002052"] == 1e-12
+
+    def test_nan_does_not_poison_regardless_of_order(self):
+        # NaN first was the poisoning order: min(nan, x) returns nan.
+        worst = {}
+        CF.update_worst_case([_mv("COMET:xcorr", "nan")], worst)
+        CF.update_worst_case([_mv("COMET:xcorr", "2.0")], worst)
+        assert worst["COMET:xcorr"] == 2.0
+
+        worst2 = {}
+        CF.update_worst_case([_mv("COMET:xcorr", "2.0")], worst2)
+        CF.update_worst_case([_mv("COMET:xcorr", "nan")], worst2)
+        assert worst2["COMET:xcorr"] == 2.0
+
+    def test_unordered_feature_range_ignores_non_finite(self):
+        worst = {}
+        orientation = CF.union_feature_orientation(("Sage",))
+        for v in ("100", "inf", "500", "nan"):
+            CF.update_worst_case([_mv("SAGE:scored_candidates", v)], worst, orientation)
+        assert worst["SAGE:scored_candidates"] == 300.0  # midpoint of [100, 500]
+
+    def test_non_finite_never_reaches_imputed_metavalues(self):
+        orientation = CF.union_feature_orientation(ALL_THREE)
+        worst = {}
+        # a degenerate PSM for every engine
+        CF.update_worst_case(COMET_ONLY + [_mv("COMET:xcorr", "-inf")], worst, orientation)
+        CF.update_worst_case(MSGF_ONLY + [_mv("MS:1002049", "nan")], worst, orientation)
+        CF.update_worst_case(SAGE_ONLY + [_mv("SAGE:longest_b", "inf")], worst, orientation)
+        out = CF.build_consensus_features(
+            [], worst, orientation=orientation,
+            presence={"Comet": False, "MS-GF+": False, "Sage": False})
+        for item in out:
+            value = float(item["value"])
+            assert value == value, item                    # not NaN
+            assert abs(value) != float("inf"), item        # not +/-inf

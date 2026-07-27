@@ -571,11 +571,30 @@ class ParquetRescoringReader(ParquetReader):
         self._psms_df["psm_metavalues"] = new_metavalues
         if scores is not None:
             self._psms_df["score"] = fixed_scores
+            self._repair_psmlist_scores(score_fallback)
 
         self._set_extra_features(
             consensus_features.union_feature_names(orientation, engine_labels=engines)
         )
         return True
+
+    def _repair_psmlist_scores(self, score_fallback: float) -> None:
+        """Mirror the sentinel repair from ``_psms_df`` onto the ``PSMList``.
+
+        The merger writes the ``inf`` sentinel to BOTH ``record["score"]`` (which
+        becomes ``_psms_df``) and ``psm.score`` (which becomes ``self._psms``),
+        but only the DataFrame was repaired. ``reader.psms`` is what the
+        annotator consumes -- ``_get_top_batch_psms`` sorts calibration
+        candidates by ``psm.score`` -- so leaving ``inf`` there means the two
+        views of the same PSM disagree, and for a higher-is-better score type
+        the sentinel PSMs sort to the FRONT of the calibration set.
+        """
+        if self._psms is None:
+            return
+        for psm in self._psms.psm_list:
+            score = getattr(psm, "score", None)
+            if score is None or not np.isfinite(score):
+                psm.score = score_fallback
 
     def _sentinel_score_fallback(self, engines, worst) -> float:
         """Finite replacement for the ``score == inf`` sentinel on PSMs that the
@@ -586,6 +605,12 @@ class ParquetRescoringReader(ParquetReader):
         the same order and uses that engine's worst observed primary. Falls back
         to the accumulated per-feature worst when the reader-level statistic was
         never populated (no PSM from that engine).
+
+        The last resort is derived from the finite scores actually present
+        rather than a constant: the score types in play (Comet ``expect``,
+        MS-GF+ ``SpecEValue``) are lower-is-better, so a literal ``0.0`` would
+        hand a PERFECT score to exactly the PSMs the score-owning engine never
+        identified -- the inverse of this module's worst-case intent.
         """
         candidates = (
             ("Comet", self.max_comet_expectation_value, "MS:1002257"),
@@ -599,7 +624,25 @@ class ParquetRescoringReader(ParquetReader):
                 return stat
             if feature in worst:
                 return worst[feature]
-        return 0.0
+        return self._worst_observed_score()
+
+    def _worst_observed_score(self) -> float:
+        """Direction-correct worst of the finite scores present in ``_psms_df``.
+
+        Lower-is-better score types take the maximum, higher-is-better the
+        minimum. Returns 0.0 only when no finite score exists at all, i.e. every
+        PSM carries the sentinel, in which case the run is degenerate anyway.
+        """
+        if self._psms_df is None or "score" not in self._psms_df:
+            return 0.0
+        finite = self._psms_df["score"][np.isfinite(self._psms_df["score"])]
+        if finite.empty:
+            logger.warning(
+                "No finite PSM score available to replace the merge sentinel; "
+                "falling back to 0.0. Every PSM appears to carry the sentinel."
+            )
+            return 0.0
+        return float(finite.min() if self.high_score_better else finite.max())
 
     def _set_extra_features(self, feature_names) -> None:
         """Union ``feature_names`` into the ``extra_features`` search parameter."""
