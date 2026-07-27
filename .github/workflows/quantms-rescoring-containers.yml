@@ -76,7 +76,7 @@
        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
        with:
          context: .
-         push: ${{ (github.event.inputs.push_images == true || github.event.inputs.push_images == '') }}
+         push: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_images == 'true' }}
          tags: |
            ghcr.io/bigbio/quantms-rescoring:latest
            ghcr.io/bigbio/quantms-rescoring:${{ steps.version.outputs.VERSION }}
@@ -96,7 +96,7 @@
          sudo rm -rf /var/lib/apt/lists/*
 
      - name: Set up Singularity
-       if: ${{ (github.event.inputs.push_images == true || github.event.inputs.push_images == '') }}
+       if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_images == 'true' }}
        uses: eWaterCycle/setup-singularity@931d4e31109e875b13309ae1d07c70ca8fbc8537
        with:
          singularity-version: 3.8.7
@@ -105,7 +105,7 @@
        run: mkdir -p /tmp/singularity-tmp /tmp/singularity-cache /tmp/singularity-lib
 
      - name: Convert Docker image to Singularity
-       if: ${{ (github.event.inputs.push_images == true || github.event.inputs.push_images == '') }}
+       if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.push_images == 'true' }}
        run: |
          singularity build --disable-cache quantms-rescoring.sif docker://ghcr.io/bigbio/quantms-rescoring:latest
          ls -la quantms-rescoring.sif
