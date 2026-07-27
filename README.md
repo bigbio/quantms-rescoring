@@ -94,7 +94,7 @@ Unlike traditional rescoring approaches, quantms-rescoring incorporates advanced
 
 ## Technical Implementation Details
 
-#### Model Selection and Optimization
+### Model Selection and Optimization
 
 - **MS2PIP Model Selection**:
   - Automatically evaluate the quality of the MS2PIP model selected by the user. If the correlation between predicted and experimental spectra is lower than a given threshold, we will try to find the best model to use (`annotator.py`). For example, if the user provides as model parameter HCD for a CI experiment, the tool will try to find the best model for this experiment within the CID models available.
@@ -117,7 +117,7 @@ Unlike traditional rescoring approaches, quantms-rescoring incorporates advanced
   - Calculates spectral entropy to quantify peak distribution uniformity
   - Analyzes TIC (Total Ion Current) distribution across peaks for quality assessment
   - Determines weighted standard deviation of m/z values for spectral complexity estimation
-- **Feature Selection**: The parameters `only_features` allows to select the features to be added to the idparquet file. For example: `--only_features "DeepLC:RtDiff,DeepLC:PredictedRetentionTimeBest,Ms2pip:DotProd"`.
+- **Feature Selection**: The parameters `only_features` allows to select the features to be added to the idparquet file. For example: `--only_features "rt_diff,predicted_retention_time_best,dotprod"`.
 
 #### Features
 
@@ -229,10 +229,10 @@ Unlike traditional rescoring approaches, quantms-rescoring incorporates advanced
 
 - **Parallel Processing**: Implements multiprocessing capabilities for handling large datasets efficiently
 - **OpenMS Compatibility Layer**: Custom helper classes that gather statistics of number of PSMs by MS levels / dissociation methods, etc.
-- **Feature Validation**: Convert all Features from MS2PIP, DeepLC, and quantms into OpenMS features with well-established names (`constants.py`)
+- **Feature Validation**: Convert all Features from MS2PIP, AlphaPeptDeep, DeepLC, and quantms into OpenMS features with well-established names (`constants.py`)
 - **PSM Filtering and Validation**:
   - Filter PSMs with **missing spectra information** or **empty peaks**.
-  - Breaks the analysis of the input file contains more than one MS level or dissociation method, **only support for MS2 level** spectra.
+  - Aborts processing when the input contains more than one MS level or dissociation method; **only MS2 spectra are supported**.
 - **Multi-Engine Consensus Rescoring**: When multiple idparquet directories from different search engines (Comet, MS-GF+, Sage) are provided, the tool merges them in priority order (`Comet > MS-GF+ > Sage`), fills missing scores for each engine, and marks the result as `quantms-consensus-rescoring`.
 - **Output / Input files**:
   - Input is an `.idparquet` directory containing `psms.parquet`, `proteins.parquet`, `protein_groups.parquet`, and `search_params.parquet`, along with a companion `.mzML` spectrum file.
