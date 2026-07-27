@@ -182,7 +182,8 @@ class TestUnionFeatureNames:
 # A sage-only PSM carries sage markers + sage features.
 SAGE_ONLY = [_mv("SAGE:matched_peaks", "14", "int"), _mv("SAGE:longest_b", "6", "int"),
              _mv("SAGE:longest_y", "8", "int"), _mv("SAGE:ln(delta_next)", "1.4"),
-             _mv("ln(hyperscore)", "3.2"), _mv("SAGE:scored_candidates", "500", "int")]
+             _mv("ln(hyperscore)", "3.2"), _mv("SAGE:scored_candidates", "500", "int"),
+             _mv("SAGE:longest_y_pct", "0.7"), _mv("SAGE:ln(matched_intensity_pct)", "-0.3")]
 COMET_SAGE = ("Comet", "Sage")
 MSGF_SAGE = ("MS-GF+", "Sage")
 ALL_THREE = ("Comet", "MS-GF+", "Sage")
@@ -297,10 +298,10 @@ class TestSageIndicators:
         # The contract that makes the merge safe: whatever we declare in
         # extra_features must exist on EVERY merged PSM, whichever engine found it.
         orientation = CF.union_feature_orientation(ALL_THREE)
-        declared = CF.union_feature_names(orientation, engine_labels=ALL_THREE)
         worst = {}
         for mvs in (COMET_ONLY, MSGF_ONLY, SAGE_ONLY):
             CF.update_worst_case(mvs, worst, orientation)
+        declared = CF.union_feature_names(orientation, engine_labels=ALL_THREE, worst=worst)
         for mvs in (COMET_ONLY, MSGF_ONLY, SAGE_ONLY, COMET_ONLY + SAGE_ONLY):
             out = CF.build_consensus_features(
                 list(mvs), worst, orientation=orientation,
@@ -336,7 +337,7 @@ class TestOrientationDefaultsFollowEngineLabels:
         # NOTE: orientation deliberately omitted -- derived from engine_labels.
         out = CF.build_consensus_features(list(COMET_ONLY), worst, engine_labels=ALL_THREE)
         names = {m["name"] for m in out}
-        declared = CF.union_feature_names(engine_labels=ALL_THREE)
+        declared = CF.union_feature_names(engine_labels=ALL_THREE, worst=worst)
         assert declared.issubset(names), declared - names
 
     def test_presence_alone_also_derives_orientation(self):
@@ -347,7 +348,7 @@ class TestOrientationDefaultsFollowEngineLabels:
         presence = CF.detect_engines(COMET_ONLY, engine_labels=ALL_THREE)
         out = CF.build_consensus_features(list(COMET_ONLY), worst, presence=presence)
         names = {m["name"] for m in out}
-        assert CF.union_feature_names(engine_labels=ALL_THREE).issubset(names)
+        assert CF.union_feature_names(engine_labels=ALL_THREE, worst=worst).issubset(names)
 
     def test_no_labels_still_defaults_to_two_engine_union(self):
         worst = {}
@@ -355,7 +356,7 @@ class TestOrientationDefaultsFollowEngineLabels:
             CF.update_worst_case(mvs, worst)
         out = CF.build_consensus_features(list(COMET_ONLY), worst)
         names = {m["name"] for m in out}
-        assert CF.union_feature_names().issubset(names)
+        assert CF.union_feature_names(worst=worst).issubset(names)
         assert not any(n.startswith("SAGE:") for n in names)
 
 
@@ -413,3 +414,90 @@ class TestNonFiniteValuesAreRejected:
             value = float(item["value"])
             assert value == value, item                    # not NaN
             assert abs(value) != float("inf"), item        # not +/-inf
+
+
+# Comet metavalues as they ACTUALLY appear in
+# tests/test_data/..._comet.idparquet: MS:1002252/3/5/6/8/9 are present but
+# MS:1002257 (expectation) is NOT -- Comet keeps expect in the `score` column
+# (score_type=expect, higher_score_better=false). The registry nonetheless
+# declares MS:1002257, which is what made the fabricated 0.0 reachable.
+COMET_NO_EXPECT = [_mv("COMET:xcorr", "1.2"), _mv("COMET:deltaCn", "0.3"),
+                   _mv("COMET:spscore", "180"), _mv("MS:1002252", "1.2"),
+                   _mv("MS:1002258", "12"), _mv("MS:1002259", "40")]
+
+
+class TestDeclaredFeatureInvariant:
+    """Regression: a feature the data never provided must not be fabricated.
+
+    impute_union_features used ``worst.get(name, 0.0)``. The registry declares
+    Comet MS:1002257 (expectation value), but Comet stores its expectation in
+    the ``score`` column and emits no such metavalue -- verified against
+    tests/test_data/..._comet.idparquet, whose metavalue names include
+    MS:1002252/3/5/6/8/9 but NOT MS:1002257. The accumulator therefore never saw
+    it and every PSM was handed MS:1002257 = 0.0, the BEST possible value for a
+    lower-is-better expectation, while it was still advertised in
+    extra_features.
+    """
+
+    def test_feature_never_observed_is_not_fabricated(self):
+        worst = {}
+        CF.update_worst_case(COMET_NO_EXPECT, worst)     # no MS:1002257 anywhere
+        assert "MS:1002257" not in worst
+        out = CF.impute_union_features([], worst)
+        names = {m["name"] for m in out}
+        assert "MS:1002257" not in names
+
+    def test_feature_never_observed_is_not_advertised(self):
+        worst = {}
+        CF.update_worst_case(COMET_NO_EXPECT, worst)
+        declared = CF.union_feature_names(worst=worst)
+        assert "MS:1002257" not in declared
+
+    def test_observed_features_are_still_imputed_and_advertised(self):
+        worst = {}
+        CF.update_worst_case(COMET_NO_EXPECT, worst)
+        declared = CF.union_feature_names(worst=worst)
+        out = {m["name"] for m in CF.impute_union_features([], worst)}
+        for name in ("COMET:xcorr", "COMET:deltaCn", "COMET:spscore"):
+            assert name in declared
+            assert name in out
+
+    def test_indicators_always_advertised_even_with_no_constants(self):
+        # Indicators are computed per PSM (0/1), never imputed, so an empty
+        # accumulator must not strip them.
+        declared = CF.union_feature_names(worst={})
+        assert {"CONSENSUS:comet", "CONSENSUS:msgf"}.issubset(declared)
+
+    def test_unconstrained_reports_exactly_what_was_dropped(self):
+        worst = {}
+        CF.update_worst_case(COMET_NO_EXPECT, worst)
+        dropped = CF.unconstrained_features(worst)
+        assert "MS:1002257" in dropped
+        assert "COMET:xcorr" not in dropped
+        assert dropped == set(CF.UNION_FEATURE_ORIENTATION) - CF.constrained_features(worst)
+
+    def test_non_finite_only_feature_is_dropped_not_fabricated(self):
+        # Every observed value non-finite -> no usable constant -> must not be
+        # advertised, and must not fall back to 0.0.
+        worst = {}
+        CF.update_worst_case([_mv("COMET:xcorr", "inf")], worst)
+        CF.update_worst_case([_mv("COMET:xcorr", "nan")], worst)
+        assert "COMET:xcorr" not in CF.constrained_features(worst)
+        assert "COMET:xcorr" not in CF.union_feature_names(worst=worst)
+        assert "COMET:xcorr" not in {m["name"] for m in CF.impute_union_features([], worst)}
+
+    def test_declared_set_is_defined_on_every_psm_for_all_engines(self):
+        # The end-to-end contract, now with a registry entry that the data never
+        # supplies (MS:1002257) present in the orientation map.
+        orientation = CF.union_feature_orientation(ALL_THREE)
+        worst = {}
+        for mvs in (COMET_NO_EXPECT, MSGF_ONLY, SAGE_ONLY):
+            CF.update_worst_case(mvs, worst, orientation)
+        declared = CF.union_feature_names(orientation, engine_labels=ALL_THREE, worst=worst)
+        assert "MS:1002257" not in declared
+        for mvs in (COMET_NO_EXPECT, MSGF_ONLY, SAGE_ONLY, COMET_NO_EXPECT + SAGE_ONLY):
+            out = CF.build_consensus_features(
+                list(mvs), worst, orientation=orientation,
+                presence=CF.detect_engines(mvs, engine_labels=ALL_THREE))
+            names = {m["name"] for m in out}
+            assert declared.issubset(names), declared - names

@@ -354,24 +354,73 @@ def impute_union_features(
     worst: Dict[str, float],
     orientation: Optional[Dict[str, Optional[bool]]] = None,
 ) -> List:
-    """Ensure every union feature is defined on ``psm_metavalues``.
+    """Ensure every *constrained* union feature is defined on ``psm_metavalues``.
 
-    Any union feature missing from this PSM (i.e. belonging to an engine that
-    did not identify it) is filled with that feature's own constant from
-    ``worst``. Idempotent: features already present are left untouched.
+    A union feature missing from this PSM (i.e. belonging to an engine that did
+    not identify it) is filled with that feature's own constant from ``worst``.
+    Idempotent: features already present are left untouched.
+
+    A feature with NO observed imputation constant is deliberately left alone
+    rather than fabricated. The previous ``worst.get(name, 0.0)`` invented a
+    value that is the BEST possible one for every lower-is-better feature: the
+    registry declares Comet ``MS:1002257`` (expectation value), but Comet stores
+    its expectation in the ``score`` column and emits no such metavalue, so the
+    accumulator never saw it and every PSM was handed a perfect expectation.
+    Pair this with :func:`constrained_features` so the same features are the
+    ones advertised in ``extra_features``.
     """
     if orientation is None:
         orientation = UNION_FEATURE_ORIENTATION
     psm_metavalues = _to_list(psm_metavalues)
     present = {item.get("name") for item in psm_metavalues if isinstance(item, dict)}
-    for name in orientation:
+    for name in constrained_features(worst, orientation):
         if name in present:
             continue
-        value = worst.get(name, 0.0)
         psm_metavalues.append(
-            {"name": name, "value": repr(float(value)), "value_type": "double"}
+            {"name": name, "value": repr(float(worst[name])), "value_type": "double"}
         )
     return psm_metavalues
+
+
+def constrained_features(
+    worst: Dict[str, float],
+    orientation: Optional[Dict[str, Optional[bool]]] = None,
+) -> Set[str]:
+    """Union features that have a finite, observed imputation constant.
+
+    Only these can honour the contract that every name advertised in
+    ``extra_features`` is defined on every merged PSM. A declared feature that
+    no engine actually emits (a wrong or renamed metavalue key, an engine whose
+    primary score lives in the ``score`` column) has no defensible fill value,
+    so it is dropped from the advertised set instead of being invented.
+    """
+    if orientation is None:
+        orientation = UNION_FEATURE_ORIENTATION
+    out: Set[str] = set()
+    for name in orientation:
+        value = worst.get(name)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value != value or value in (float("inf"), float("-inf")):
+            continue
+        out.add(name)
+    return out
+
+
+def unconstrained_features(
+    worst: Dict[str, float],
+    orientation: Optional[Dict[str, Optional[bool]]] = None,
+) -> Set[str]:
+    """Declared features with no observed constant -- i.e. those dropped by
+    :func:`constrained_features`. Useful for logging what the registry claimed
+    but the data never provided."""
+    if orientation is None:
+        orientation = UNION_FEATURE_ORIENTATION
+    return set(orientation) - constrained_features(worst, orientation)
 
 
 def add_engine_source_features(
@@ -463,12 +512,23 @@ def build_consensus_features(
 def union_feature_names(
     orientation: Optional[Dict[str, Optional[bool]]] = None,
     engine_labels: Optional[Sequence[str]] = None,
+    worst: Optional[Dict[str, float]] = None,
 ) -> Set[str]:
-    """All Percolator feature names this module guarantees on every merged PSM."""
+    """All Percolator feature names this module guarantees on every merged PSM.
+
+    Pass ``worst`` (the accumulator from :func:`update_worst_case`) to get the
+    set that is ACTUALLY guaranteed: features the data never provided have no
+    imputation constant, are therefore not written onto missing-engine PSMs, and
+    must not be advertised to Percolator. Without ``worst`` this returns the
+    registry's nominal set, which is a superset.
+    """
     if orientation is None:
         orientation = (
             union_feature_orientation(engine_labels)
             if engine_labels
             else UNION_FEATURE_ORIENTATION
         )
-    return set(orientation) | indicator_names(engine_labels)
+    names = set(orientation) if worst is None else constrained_features(worst, orientation)
+    # Indicators are computed per PSM (0/1), never imputed, so they are always
+    # guaranteed regardless of what the engines emitted.
+    return names | indicator_names(engine_labels)

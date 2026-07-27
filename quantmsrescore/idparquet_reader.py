@@ -573,8 +573,24 @@ class ParquetRescoringReader(ParquetReader):
             self._psms_df["score"] = fixed_scores
             self._repair_psmlist_scores(score_fallback)
 
+        # Advertise ONLY the features that actually got an imputation constant.
+        # A registry entry the data never provided (renamed metavalue key, or a
+        # primary score that lives in the `score` column rather than in
+        # psm_metavalues, as Comet's MS:1002257 does) cannot be written onto
+        # missing-engine PSMs, so declaring it would hand Percolator a name that
+        # is absent from some PSMs -- the defect this whole path exists to stop.
+        dropped = consensus_features.unconstrained_features(worst, orientation)
+        if dropped:
+            logger.warning(
+                "Consensus features declared by the registry but never observed in the "
+                "data, so they are NOT advertised to Percolator: %s. Check that these "
+                "metavalue names match what the engine emits.",
+                ", ".join(sorted(dropped)),
+            )
         self._set_extra_features(
-            consensus_features.union_feature_names(orientation, engine_labels=engines)
+            consensus_features.union_feature_names(
+                orientation, engine_labels=engines, worst=worst
+            )
         )
         return True
 
