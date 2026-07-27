@@ -750,20 +750,33 @@ class FeatureAnnotator:
         psms_df = self._idparquet_reader.psms_df.drop(columns=["mods", "mod_sites", "nce", "instrument"])
         added_features: Set[str] = set()
         main_scores_features: Set[str] = set()
+        # For the two-engine (comet + msgf) consensus merge the feature union,
+        # the orientation-aware worst-case imputation of the missing engine and
+        # the engine-source indicators are already built once, up front, by
+        # ParquetRescoringReader._apply_consensus_features (so the
+        # ms2features-off psm_feature_clean path is fixed too). In that case we
+        # only layer the ms2 rescoring features (MS2PIP/DeepLC/...) on top.
+        # Every other merged combination (e.g. anything involving Sage) still
+        # goes through the primary-score fill implemented on dev.
+        consensus_applied = self._idparquet_reader.consensus_features_applied
         for _, record in psms_df.iterrows():
             record = record.to_dict()
             psm_features = psm_dict.get(record["provenance_data"])
             psm_metavalues = record["psm_metavalues"]
-            record, psm_metavalues, main_scores_features = self.fill_search_scores(record, psm_metavalues)
+            if not consensus_applied:
+                record, psm_metavalues, main_scores_features = self.fill_search_scores(record, psm_metavalues)
             psm_metavalues, added_features = self.add_rescoring_features(psm_metavalues, psm_features, added_features)
             record["psm_metavalues"] = psm_metavalues
             record.pop("provenance_data", None)
             records.append(record)
 
-        if len(set(self._idparquet_reader.merge_search_engines)) > 1:
+        if not consensus_applied and len(set(self._idparquet_reader.merge_search_engines)) > 1:
             all_features = main_scores_features.union(added_features)
         else:
-            # Update search parameters with added features
+            # Union the newly added ms2 features into the existing extra_features.
+            # For a consensus (comet + msgf) run the reader already recorded the
+            # union feature set there; for a single-engine run this preserves the
+            # search engine's own extra_features.
             try:
                 features_existing = self._idparquet_reader.get_meta_features(
                     self._idparquet_reader.search_params["sp_metavalues"],
@@ -777,7 +790,6 @@ class FeatureAnnotator:
                 logger.debug(f"No existing extra_features found: {e}")
                 existing_set = set()
 
-            # Combine existing and new features
             all_features = existing_set.union(added_features)
 
         found = False

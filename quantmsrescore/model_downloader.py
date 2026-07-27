@@ -294,14 +294,14 @@ def download_alphapeptdeep_models(model_dir: Optional[Path] = None) -> None:
 )
 @click.option(
     "--models",
-    help="Comma-separated list of models to download: ms2pip, deeplc, alphapeptdeep (default: all)",
-    default="ms2pip,deeplc,alphapeptdeep",
+    help="Comma-separated list of models to download: ms2pip, alphapeptdeep (default: ms2pip,alphapeptdeep)",
+    default="ms2pip,alphapeptdeep",
 )
 def download_models(model_dir: Optional[str], log_level: str, models: str) -> None:
     """
     Download all required models for quantms-rescoring for offline use.
 
-    This command downloads models for MS2PIP, DeepLC, and AlphaPeptDeep
+    This command downloads models for MS2PIP and AlphaPeptDeep
     to enable running quantms-rescoring in environments without internet access.
 
     Examples
@@ -316,7 +316,7 @@ def download_models(model_dir: Optional[str], log_level: str, models: str) -> No
 
     Download only specific models:
 
-        $ rescoring download_models --models deeplc,alphapeptdeep
+        $ rescoring download_models --models alphapeptdeep
 
     Parameters
     ----------
@@ -326,7 +326,7 @@ def download_models(model_dir: Optional[str], log_level: str, models: str) -> No
     log_level : str
         Logging level (default: "info").
     models : str
-        Comma-separated list of models to download (default: "ms2pip,deeplc,alphapeptdeep").
+        Comma-separated list of models to download (default: "ms2pip,alphapeptdeep").
     """
     # Configure logging
     configure_logging(log_level.upper())
