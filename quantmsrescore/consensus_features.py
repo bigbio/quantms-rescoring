@@ -62,9 +62,15 @@ imputed to the worst value observed for that feature. ``None`` features are
 imputed to the *midpoint* of their observed range — a deliberately
 non-informative fill, because imputing an extreme for a feature that does not
 encode confidence would inject a false signal in whichever direction we
-guessed. This is used for Sage's ``scored_candidates`` (a property of the
-spectrum's search space, not of PSM quality), where an extreme fill in either
-direction would be an unjustified claim.
+guessed.
+
+No registry feature currently uses ``None``: Sage's ``scored_candidates`` was
+originally registered that way on first-principles reasoning (it describes the
+search space, not match quality), but measured target/decoy separation put it
+clearly in the higher-is-better direction, so it is registered as such. The
+mechanism is kept because it is the correct answer whenever a feature's
+direction genuinely cannot be established, and guessing would inject a signal
+that was never measured.
 """
 
 from __future__ import annotations
@@ -142,22 +148,50 @@ MSGF_FEATURE_ORIENTATION: Dict[str, Optional[bool]] = {
     "MeanErrorAll": False,
     "StdevErrorAll": False,
 }
-# Sage feature names as emitted into psm_metavalues by quantms (the ``psm_file``
-# rows of Sage's feature table; see ``sage_feature.py``). ``ln(hyperscore)`` is
-# the primary score and is written without the ``SAGE:`` prefix by the merger.
+# Sage features, taken from the metavalue names Sage actually emits and with
+# orientations derived from measured target/decoy separation rather than
+# guessed. Source: tests/test_data/..._sage_ms2rescore.idXML (5,755 PeptideHits,
+# 4,219 target / 1,463 decoy); mean target vs mean decoy per feature:
+#
+#   SAGE:ln(-poisson)               2.0962 vs 0.9212   -> higher better
+#   SAGE:ln(delta_next)             2.2498 vs 0.7155   -> higher better
+#   SAGE:ln(matched_intensity_pct)  2.8076 vs 1.8669   -> higher better
+#   SAGE:longest_b                  4.9682 vs 1.1080   -> higher better
+#   SAGE:longest_y                  4.8085 vs 1.2324   -> higher better
+#   SAGE:longest_y_pct              0.4014 vs 0.1369   -> higher better
+#   SAGE:matched_peaks             13.7516 vs 3.6104   -> higher better
+#   SAGE:scored_candidates        193.0092 vs 113.7204 -> higher better
+#
+# Deliberately NOT registered:
+#   ln(hyperscore)        Sage's primary score is NOT a metavalue at all -- it
+#                         lives in the `score` column (score_type="hyperscore",
+#                         higher_score_better="true"), exactly like Comet's
+#                         MS:1002257. Declaring it produced a feature no engine
+#                         emits. Consequence: in a merge where Sage is not the
+#                         dominant engine its primary score is currently lost;
+#                         the nine auxiliary features below still carry signal.
+#   SAGE:ln(delta_best)   Measured as exactly 0.0000 for BOTH targets and decoys
+#                         in the fixture, because quantms searches at
+#                         num_hits=1 and delta-to-best is 0 for a rank-1 hit. A
+#                         zero-variance feature carries no information, and its
+#                         sign convention cannot be established from constant
+#                         data, so it is left out rather than guessed at.
 SAGE_FEATURE_ORIENTATION: Dict[str, Optional[bool]] = {
-    "ln(hyperscore)": True,               # primary
+    "SAGE:ln(-poisson)": True,
     "SAGE:ln(delta_next)": True,          # bigger gap to the runner-up = better
     "SAGE:ln(matched_intensity_pct)": True,
     "SAGE:matched_peaks": True,
     "SAGE:longest_b": True,
     "SAGE:longest_y": True,
     "SAGE:longest_y_pct": True,
-    # Number of candidates scored for the spectrum. This describes the search
-    # space, not the quality of the match, so it has no confidence ordering:
-    # imputing either extreme would assert something we have not measured.
-    # Midpoint-imputed instead (see module docstring).
-    "SAGE:scored_candidates": None,
+    # Number of candidates scored for the spectrum. Reasoning from first
+    # principles this looks like a property of the search space rather than of
+    # match quality, which argued for an unordered (midpoint) fill -- but the
+    # measurement above separates targets from decoys clearly and consistently
+    # in the higher-is-better direction. Data wins over the prior, and it is
+    # also the more conservative choice: missing PSMs get the observed MINIMUM
+    # instead of a mid-range value.
+    "SAGE:scored_candidates": True,
 }
 
 ENGINE_REGISTRY: Dict[str, EngineSpec] = {
@@ -258,6 +292,24 @@ def _to_list(psm_metavalues) -> List:
     return list(psm_metavalues)
 
 
+def meta_map(psm_metavalues) -> Dict[str, object]:
+    """Build a ``{name: value}`` map for one PSM's metavalues.
+
+    Both the worst-case accumulation and the presence detection previously did a
+    linear scan of the metavalue list *per feature*, i.e. O(features x
+    metavalues) per PSM. On a production run (~6.6M PSMs, ~40 registry features,
+    ~25 metavalues each) that is billions of dict lookups. Building this map once
+    per PSM makes both passes O(metavalues) plus O(features) hash lookups.
+    """
+    out: Dict[str, object] = {}
+    for item in _to_list(psm_metavalues):
+        if isinstance(item, dict):
+            name = item.get("name")
+            if name is not None and name not in out:
+                out[name] = item.get("value")
+    return out
+
+
 def _has_meta(psm_metavalues, name: str) -> bool:
     for item in _to_list(psm_metavalues):
         if isinstance(item, dict) and item.get("name") == name:
@@ -275,6 +327,7 @@ def _meta_value(psm_metavalues, name: str):
 def detect_engines(
     psm_metavalues,
     engine_labels: Optional[Sequence[str]] = None,
+    values: Optional[Dict[str, object]] = None,
 ) -> Dict[str, bool]:
     """Detect which of the configured engines genuinely identified a PSM.
 
@@ -286,8 +339,9 @@ def detect_engines(
     dict
         engine label -> ``True``/``False``.
     """
+    names = set(values) if values is not None else set(meta_map(psm_metavalues))
     return {
-        spec.label: any(_has_meta(psm_metavalues, m) for m in spec.presence_markers)
+        spec.label: any(m in names for m in spec.presence_markers)
         for spec in _specs(engine_labels)
     }
 
@@ -305,6 +359,7 @@ def update_worst_case(
     psm_metavalues,
     worst: Dict[str, float],
     orientation: Optional[Dict[str, Optional[bool]]] = None,
+    values: Optional[Dict[str, object]] = None,
 ) -> Dict[str, float]:
     """Accumulate per-feature imputation constants in-place.
 
@@ -319,8 +374,10 @@ def update_worst_case(
     """
     if orientation is None:
         orientation = UNION_FEATURE_ORIENTATION
+    if values is None:
+        values = meta_map(psm_metavalues)
     for name, higher_better in orientation.items():
-        raw = _meta_value(psm_metavalues, name)
+        raw = values.get(name)
         if raw is None:
             continue
         try:
@@ -354,24 +411,73 @@ def impute_union_features(
     worst: Dict[str, float],
     orientation: Optional[Dict[str, Optional[bool]]] = None,
 ) -> List:
-    """Ensure every union feature is defined on ``psm_metavalues``.
+    """Ensure every *constrained* union feature is defined on ``psm_metavalues``.
 
-    Any union feature missing from this PSM (i.e. belonging to an engine that
-    did not identify it) is filled with that feature's own constant from
-    ``worst``. Idempotent: features already present are left untouched.
+    A union feature missing from this PSM (i.e. belonging to an engine that did
+    not identify it) is filled with that feature's own constant from ``worst``.
+    Idempotent: features already present are left untouched.
+
+    A feature with NO observed imputation constant is deliberately left alone
+    rather than fabricated. The previous ``worst.get(name, 0.0)`` invented a
+    value that is the BEST possible one for every lower-is-better feature: the
+    registry declares Comet ``MS:1002257`` (expectation value), but Comet stores
+    its expectation in the ``score`` column and emits no such metavalue, so the
+    accumulator never saw it and every PSM was handed a perfect expectation.
+    Pair this with :func:`constrained_features` so the same features are the
+    ones advertised in ``extra_features``.
     """
     if orientation is None:
         orientation = UNION_FEATURE_ORIENTATION
     psm_metavalues = _to_list(psm_metavalues)
     present = {item.get("name") for item in psm_metavalues if isinstance(item, dict)}
-    for name in orientation:
+    for name in constrained_features(worst, orientation):
         if name in present:
             continue
-        value = worst.get(name, 0.0)
         psm_metavalues.append(
-            {"name": name, "value": repr(float(value)), "value_type": "double"}
+            {"name": name, "value": repr(float(worst[name])), "value_type": "double"}
         )
     return psm_metavalues
+
+
+def constrained_features(
+    worst: Dict[str, float],
+    orientation: Optional[Dict[str, Optional[bool]]] = None,
+) -> Set[str]:
+    """Union features that have a finite, observed imputation constant.
+
+    Only these can honour the contract that every name advertised in
+    ``extra_features`` is defined on every merged PSM. A declared feature that
+    no engine actually emits (a wrong or renamed metavalue key, an engine whose
+    primary score lives in the ``score`` column) has no defensible fill value,
+    so it is dropped from the advertised set instead of being invented.
+    """
+    if orientation is None:
+        orientation = UNION_FEATURE_ORIENTATION
+    out: Set[str] = set()
+    for name in orientation:
+        value = worst.get(name)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value != value or value in (float("inf"), float("-inf")):
+            continue
+        out.add(name)
+    return out
+
+
+def unconstrained_features(
+    worst: Dict[str, float],
+    orientation: Optional[Dict[str, Optional[bool]]] = None,
+) -> Set[str]:
+    """Declared features with no observed constant -- i.e. those dropped by
+    :func:`constrained_features`. Useful for logging what the registry claimed
+    but the data never provided."""
+    if orientation is None:
+        orientation = UNION_FEATURE_ORIENTATION
+    return set(orientation) - constrained_features(worst, orientation)
 
 
 def add_engine_source_features(
@@ -463,12 +569,23 @@ def build_consensus_features(
 def union_feature_names(
     orientation: Optional[Dict[str, Optional[bool]]] = None,
     engine_labels: Optional[Sequence[str]] = None,
+    worst: Optional[Dict[str, float]] = None,
 ) -> Set[str]:
-    """All Percolator feature names this module guarantees on every merged PSM."""
+    """All Percolator feature names this module guarantees on every merged PSM.
+
+    Pass ``worst`` (the accumulator from :func:`update_worst_case`) to get the
+    set that is ACTUALLY guaranteed: features the data never provided have no
+    imputation constant, are therefore not written onto missing-engine PSMs, and
+    must not be advertised to Percolator. Without ``worst`` this returns the
+    registry's nominal set, which is a superset.
+    """
     if orientation is None:
         orientation = (
             union_feature_orientation(engine_labels)
             if engine_labels
             else UNION_FEATURE_ORIENTATION
         )
-    return set(orientation) | indicator_names(engine_labels)
+    names = set(orientation) if worst is None else constrained_features(worst, orientation)
+    # Indicators are computed per PSM (0/1), never imputed, so they are always
+    # guaranteed regardless of what the engines emitted.
+    return names | indicator_names(engine_labels)
