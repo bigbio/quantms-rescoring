@@ -180,10 +180,16 @@ class TestUnionFeatureNames:
 # ---------------------------------------------------------------------------
 
 # A sage-only PSM carries sage markers + sage features.
+# Mirrors the metavalue names Sage actually emits, verified against
+# tests/test_data/..._sage_ms2rescore.idXML. Note ln(hyperscore) is absent --
+# Sage's primary score lives in the `score` column, not in metavalues -- and
+# SAGE:ln(delta_best) is present in the data but deliberately unregistered
+# (constant 0.0 at num_hits=1).
 SAGE_ONLY = [_mv("SAGE:matched_peaks", "14", "int"), _mv("SAGE:longest_b", "6", "int"),
              _mv("SAGE:longest_y", "8", "int"), _mv("SAGE:ln(delta_next)", "1.4"),
-             _mv("ln(hyperscore)", "3.2"), _mv("SAGE:scored_candidates", "500", "int"),
-             _mv("SAGE:longest_y_pct", "0.7"), _mv("SAGE:ln(matched_intensity_pct)", "-0.3")]
+             _mv("SAGE:ln(-poisson)", "2.1"), _mv("SAGE:scored_candidates", "500", "int"),
+             _mv("SAGE:longest_y_pct", "0.7"), _mv("SAGE:ln(matched_intensity_pct)", "-0.3"),
+             _mv("SAGE:ln(delta_best)", "0.0")]
 COMET_SAGE = ("Comet", "Sage")
 MSGF_SAGE = ("MS-GF+", "Sage")
 ALL_THREE = ("Comet", "MS-GF+", "Sage")
@@ -253,14 +259,19 @@ class TestSageImputation:
         assert worst["SAGE:matched_peaks"] == 5.0
 
     def test_unordered_feature_uses_midpoint_not_an_extreme(self):
-        # scored_candidates has no confidence ordering; imputing either extreme
-        # would assert a signal we have not measured.
-        orientation = CF.union_feature_orientation(("Sage",))
+        # No registry feature uses None today (scored_candidates was measured
+        # into the higher-is-better direction), but the mechanism must stay
+        # correct: a feature whose direction cannot be established is filled
+        # with a non-informative midpoint rather than a fabricated extreme.
+        orientation = {"UNORDERED:feature": None}
         worst = {}
         for v in ("100", "300", "500"):
-            CF.update_worst_case([_mv("SAGE:scored_candidates", v)], worst, orientation)
-        assert CF.SAGE_FEATURE_ORIENTATION["SAGE:scored_candidates"] is None
-        assert worst["SAGE:scored_candidates"] == 300.0  # midpoint of [100, 500]
+            CF.update_worst_case([_mv("UNORDERED:feature", v)], worst, orientation)
+        assert worst["UNORDERED:feature"] == 300.0  # midpoint of [100, 500]
+
+    def test_scored_candidates_is_higher_better_per_measurement(self):
+        # Measured on the Sage idXML fixture: target mean 193.0 vs decoy 113.7.
+        assert CF.SAGE_FEATURE_ORIENTATION["SAGE:scored_candidates"] is True
 
     def test_no_inf_or_nan_leaks_into_imputed_values(self):
         orientation = CF.union_feature_orientation(ALL_THREE)
@@ -395,10 +406,10 @@ class TestNonFiniteValuesAreRejected:
 
     def test_unordered_feature_range_ignores_non_finite(self):
         worst = {}
-        orientation = CF.union_feature_orientation(("Sage",))
+        orientation = {"UNORDERED:feature": None}
         for v in ("100", "inf", "500", "nan"):
-            CF.update_worst_case([_mv("SAGE:scored_candidates", v)], worst, orientation)
-        assert worst["SAGE:scored_candidates"] == 300.0  # midpoint of [100, 500]
+            CF.update_worst_case([_mv("UNORDERED:feature", v)], worst, orientation)
+        assert worst["UNORDERED:feature"] == 300.0  # midpoint of [100, 500]
 
     def test_non_finite_never_reaches_imputed_metavalues(self):
         orientation = CF.union_feature_orientation(ALL_THREE)
@@ -501,3 +512,48 @@ class TestDeclaredFeatureInvariant:
                 presence=CF.detect_engines(mvs, engine_labels=ALL_THREE))
             names = {m["name"] for m in out}
             assert declared.issubset(names), declared - names
+
+
+class TestSageRegistryMatchesRealData:
+    """Data-driven guard: the Sage registry must match the metavalue names Sage
+    actually emits, checked against the committed Sage idXML fixture.
+
+    This exists because the registry was originally written from the ms2rescore
+    feature table and was wrong in three ways: it missed SAGE:ln(-poisson),
+    it declared ln(hyperscore) which is not a metavalue at all (Sage's primary
+    score lives in the `score` column), and it guessed the direction of
+    SAGE:scored_candidates.
+    """
+
+    IDXML = ("tests/test_data/TMT_Erwinia_1uLSike_Top10HCD_isol2_45stepped_60min_01"
+             "_sage_ms2rescore.idXML")
+
+    def _sage_names(self):
+        import os
+        import re
+        if not os.path.exists(self.IDXML):
+            import pytest
+            pytest.skip("Sage idXML fixture not available")
+        text = open(self.IDXML, encoding="utf-8", errors="ignore").read()
+        return {m for m in re.findall(r'name="(SAGE:[^"]+)"', text)}
+
+    def test_every_registered_sage_feature_exists_in_the_data(self):
+        emitted = self._sage_names()
+        registered = set(CF.SAGE_FEATURE_ORIENTATION)
+        assert registered <= emitted, registered - emitted
+
+    def test_hyperscore_is_not_registered_as_a_metavalue(self):
+        # Sage's primary score is score_type="hyperscore" in the `score` column.
+        # Note the idXML->idparquet conversion DROPS the primary score's
+        # UserParam entirely: the comet idXML carries MS:1002257 but the comet
+        # idparquet does not. Registering a primary score therefore declares a
+        # feature that cannot exist on any merged PSM.
+        assert "ln(hyperscore)" not in CF.SAGE_FEATURE_ORIENTATION
+        assert "hyperscore" not in CF.SAGE_FEATURE_ORIENTATION
+
+    def test_deliberately_unregistered_names_are_documented_not_forgotten(self):
+        emitted = self._sage_names()
+        unregistered = emitted - set(CF.SAGE_FEATURE_ORIENTATION)
+        # ln(delta_best) is constant 0.0 at num_hits=1, so it is left out on
+        # purpose. Anything else appearing here is drift that needs a decision.
+        assert unregistered == {"SAGE:ln(delta_best)"}, unregistered
