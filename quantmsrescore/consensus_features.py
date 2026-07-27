@@ -292,6 +292,27 @@ def _to_list(psm_metavalues) -> List:
     return list(psm_metavalues)
 
 
+def as_metavalue_list(value) -> List:
+    """Normalise a metavalue container to a plain ``list``.
+
+    Values read back from parquet arrive as numpy arrays, and a numpy array has
+    no unambiguous truth value: ``value or []`` raises
+
+        ValueError: The truth value of an array with more than one element is
+        ambiguous. Use a.any() or a.all()
+
+    so the usual ``or []`` idiom is a trap here and must never be used on these
+    containers. This is the one place that decides how they are coerced.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return list(value)
+
+
 def meta_map(psm_metavalues) -> Dict[str, object]:
     """Build a ``{name: value}`` map for one PSM's metavalues.
 

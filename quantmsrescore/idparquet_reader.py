@@ -659,9 +659,9 @@ class ParquetRescoringReader(ParquetReader):
         return common or set()
 
     def _existing_extra_features(self) -> set:
-        sp_metavalues = self.search_params.get("sp_metavalues", []) or []
-        if not isinstance(sp_metavalues, list):
-            sp_metavalues = sp_metavalues.tolist()
+        sp_metavalues = consensus_features.as_metavalue_list(
+            self.search_params.get("sp_metavalues")
+        )
         for mv in sp_metavalues:
             if isinstance(mv, dict) and mv.get("name") == "extra_features" and mv.get("value"):
                 return {n for n in str(mv["value"]).split(",") if n}
@@ -680,9 +680,9 @@ class ParquetRescoringReader(ParquetReader):
                 "Dropping inherited extra_features not present on every merged PSM: %s",
                 ", ".join(sorted(dropped)),
             )
-        sp_metavalues = self.search_params.get("sp_metavalues", []) or []
-        if not isinstance(sp_metavalues, list):
-            sp_metavalues = sp_metavalues.tolist()
+        sp_metavalues = consensus_features.as_metavalue_list(
+            self.search_params.get("sp_metavalues")
+        )
         value = ",".join(sorted(feature_names))
         for mv in sp_metavalues:
             if isinstance(mv, dict) and mv.get("name") == "extra_features":
@@ -762,11 +762,9 @@ class ParquetRescoringReader(ParquetReader):
 
     def _set_extra_features(self, feature_names) -> None:
         """Union ``feature_names`` into the ``extra_features`` search parameter."""
-        sp_metavalues = self.search_params.get("sp_metavalues", [])
-        if sp_metavalues is None:
-            sp_metavalues = []
-        elif not isinstance(sp_metavalues, list):
-            sp_metavalues = sp_metavalues.tolist()
+        sp_metavalues = consensus_features.as_metavalue_list(
+            self.search_params.get("sp_metavalues")
+        )
 
         existing: set = set()
         for mv in sp_metavalues:
