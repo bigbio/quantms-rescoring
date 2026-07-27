@@ -636,7 +636,13 @@ class ParquetRescoringReader(ParquetReader):
         # advertises MS:1002053 that its own PSMs do not carry; unioning those
         # in would re-introduce engine-specific and outright absent names into
         # the very table this path exists to make complete.
-        universal = self._names_on_every_psm(new_metavalues)
+        # "Present on every PSM" includes the psms.parquet COLUMNS, not just the
+        # metavalues. Sage advertises a feature literally named `score`
+        # (verified on a real SageAdapter idparquet: extra_features =
+        # "score,SAGE:ln(-poisson),..."), which refers to the score column and
+        # is defined on every row once the inf sentinel has been repaired above.
+        # Intersecting against metavalues alone would silently discard it.
+        universal = self._names_on_every_psm(new_metavalues) | set(self._psms_df.columns)
         inherited = self._existing_extra_features() & universal
         self._replace_extra_features(guaranteed | inherited)
         return True

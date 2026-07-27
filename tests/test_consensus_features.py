@@ -551,6 +551,39 @@ class TestSageRegistryMatchesRealData:
         assert "ln(hyperscore)" not in CF.SAGE_FEATURE_ORIENTATION
         assert "hyperscore" not in CF.SAGE_FEATURE_ORIENTATION
 
+    def test_registry_matches_a_real_sageadapter_idparquet(self):
+        """Names verified by running SageAdapter for real (OpenMS
+        openms-tools-thirdparty 2026.07.02) on an MSV000085836 TMT mzML against
+        the decoy database from that run: 66 PSMs, 67 matched proteins
+        (55% target / 44% decoy). The psm_metavalues names it produced were:
+
+            DeltaMass, PTM, SAGE:ln(-poisson), SAGE:ln(delta_best),
+            SAGE:ln(delta_next), SAGE:ln(matched_intensity_pct),
+            SAGE:longest_b, SAGE:longest_y, SAGE:longest_y_pct,
+            SAGE:matched_peaks, SAGE:scored_candidates, protein_references,
+            spectrum_q
+
+        with score_type="ln(hyperscore)" and higher_score_better=True.
+
+        Two consequences are locked in below: every registered name really is
+        emitted, and ln(hyperscore) is a SCORE TYPE rather than a metavalue.
+        """
+        emitted_by_sageadapter = {
+            "SAGE:ln(-poisson)", "SAGE:ln(delta_best)", "SAGE:ln(delta_next)",
+            "SAGE:ln(matched_intensity_pct)", "SAGE:longest_b", "SAGE:longest_y",
+            "SAGE:longest_y_pct", "SAGE:matched_peaks", "SAGE:scored_candidates",
+        }
+        registered = set(CF.SAGE_FEATURE_ORIENTATION)
+        assert registered <= emitted_by_sageadapter, registered - emitted_by_sageadapter
+        assert emitted_by_sageadapter - registered == {"SAGE:ln(delta_best)"}
+
+    def test_spectrum_q_is_not_registered_as_a_feature(self):
+        # SageAdapter also emits `spectrum_q`, a q-value computed from
+        # target/decoy competition. Feeding a label-derived quantity to
+        # Percolator as a feature would be genuine leakage, so it must stay out
+        # of the registry.
+        assert not any("spectrum_q" in n for n in CF.SAGE_FEATURE_ORIENTATION)
+
     def test_deliberately_unregistered_names_are_documented_not_forgotten(self):
         emitted = self._sage_names()
         unregistered = emitted - set(CF.SAGE_FEATURE_ORIENTATION)
