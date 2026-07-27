@@ -590,3 +590,61 @@ class TestSageRegistryMatchesRealData:
         # ln(delta_best) is constant 0.0 at num_hits=1, so it is left out on
         # purpose. Anything else appearing here is drift that needs a decision.
         assert unregistered == {"SAGE:ln(delta_best)"}, unregistered
+
+
+class TestMetavalueContainerNormalisation:
+    """Regression: parquet hands back numpy arrays, which have no unambiguous
+    truth value.
+
+    ``search_params["sp_metavalues"] or []`` raised
+
+        ValueError: The truth value of an array with more than one element is
+        ambiguous. Use a.any() or a.all()
+
+    which surfaced as test_psm_clean_multi_engine failing with exit_code 1 on a
+    real comet+msgf merge -- after the consensus features had already been
+    built, so the whole run was lost at the very last step.
+    """
+
+    class _FakeArray:
+        """Stands in for numpy's ndarray: iterable, but truth-testing raises."""
+
+        def __init__(self, items):
+            self._items = list(items)
+
+        def tolist(self):
+            return list(self._items)
+
+        def __iter__(self):
+            return iter(self._items)
+
+        def __len__(self):
+            return len(self._items)
+
+        def __bool__(self):
+            raise ValueError(
+                "The truth value of an array with more than one element is "
+                "ambiguous. Use a.any() or a.all()"
+            )
+
+    def test_array_like_is_normalised_without_truth_testing(self):
+        arr = self._FakeArray([_mv("COMET:xcorr", "1.2"), _mv("MS:1002258", "12")])
+        out = CF.as_metavalue_list(arr)
+        assert isinstance(out, list)
+        assert [m["name"] for m in out] == ["COMET:xcorr", "MS:1002258"]
+
+    def test_the_old_or_idiom_really_would_have_raised(self):
+        # Guards the premise: if this stops raising, the fake no longer models
+        # numpy and the regression test above is worthless.
+        import pytest
+        arr = self._FakeArray([_mv("a", "1"), _mv("b", "2")])
+        with pytest.raises(ValueError, match="truth value"):
+            arr or []
+
+    def test_none_and_plain_list_pass_through(self):
+        assert CF.as_metavalue_list(None) == []
+        items = [_mv("x", "1")]
+        assert CF.as_metavalue_list(items) is items
+
+    def test_empty_array_like_is_empty_list(self):
+        assert CF.as_metavalue_list(self._FakeArray([])) == []
