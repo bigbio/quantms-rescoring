@@ -786,24 +786,42 @@ class ParquetRescoringReader(ParquetReader):
             )
         self.search_params["sp_metavalues"] = sp_metavalues
 
+    @staticmethod
+    def _as_float(value):
+        """Best-effort float, or None. ``get_meta_features`` returns None when a
+        PSM lacks the requested metavalue, and ``float(None)`` raises; a single
+        such PSM must not kill the whole run."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def get_default_scores(self, search_params, psm_metavalues, record):
+        """Accumulate the per-engine worst primary score across PSMs.
+
+        A PSM whose primary score is missing (e.g. a Comet PSM without
+        ``MS:1002252`` xcorr, seen with ms2rescore-annotated phospho/ETD data)
+        simply does not contribute to the min/max rather than crashing. If EVERY
+        PSM of an engine lacks the value the seed (inf / -inf) is left untouched,
+        which :meth:`_sentinel_score_fallback` already handles.
+        """
         if "MS-GF+" in search_params["search_engine"]:
-            msgf_RawScore = float(self.get_meta_features(psm_metavalues, "MS:1002049"))
-            msgf_EValue = float(record["score"])
-            if msgf_RawScore < self.min_msgf_RawScore:
+            msgf_RawScore = self._as_float(self.get_meta_features(psm_metavalues, "MS:1002049"))
+            msgf_EValue = self._as_float(record["score"])
+            if msgf_RawScore is not None and msgf_RawScore < self.min_msgf_RawScore:
                 self.min_msgf_RawScore = msgf_RawScore
-            if msgf_EValue > self.max_msgf_EValue:
+            if msgf_EValue is not None and msgf_EValue > self.max_msgf_EValue:
                 self.max_msgf_EValue = msgf_EValue
         elif "Sage" in search_params["search_engine"]:
-            sage_hyperscore = float(record["score"])
-            if sage_hyperscore < self.min_sage_hyperscore:
+            sage_hyperscore = self._as_float(record["score"])
+            if sage_hyperscore is not None and sage_hyperscore < self.min_sage_hyperscore:
                 self.min_sage_hyperscore = sage_hyperscore
         else:
-            comet_xcorr = float(self.get_meta_features(psm_metavalues, "MS:1002252"))
-            comet_expectation_value = float(record["score"])
-            if comet_xcorr < self.min_comet_xcorr:
+            comet_xcorr = self._as_float(self.get_meta_features(psm_metavalues, "MS:1002252"))
+            comet_expectation_value = self._as_float(record["score"])
+            if comet_xcorr is not None and comet_xcorr < self.min_comet_xcorr:
                 self.min_comet_xcorr = comet_xcorr
-            if comet_expectation_value > self.max_comet_expectation_value:
+            if comet_expectation_value is not None and comet_expectation_value > self.max_comet_expectation_value:
                 self.max_comet_expectation_value = comet_expectation_value
 
     @staticmethod
