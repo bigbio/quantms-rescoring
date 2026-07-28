@@ -234,7 +234,7 @@ from warnings import filterwarnings
 # Suppress warnings about OPENMS_DATA_PATH
 filterwarnings("ignore", message=".*OPENMS_DATA_PATH.*", category=UserWarning)
 
-__version__ = "0.0.22"
+__version__ = "0.0.23"
 
 __all__ = [
     "configure_threading",
