@@ -751,7 +751,12 @@ class ParquetRescoringReader(ParquetReader):
         """
         if self._psms_df is None or "score" not in self._psms_df:
             return 0.0
-        finite = self._psms_df["score"][np.isfinite(self._psms_df["score"])]
+        # Coerce first: the score column can be object-dtype (e.g. a null score
+        # arrives as Python None), and np.isfinite raises on object arrays even
+        # without a None present. pd.to_numeric(errors="coerce") turns anything
+        # non-numeric into NaN, which dropna() then removes.
+        scores = pd.to_numeric(self._psms_df["score"], errors="coerce")
+        finite = scores[np.isfinite(scores)]
         if finite.empty:
             logger.warning(
                 "No finite PSM score available to replace the merge sentinel; "
