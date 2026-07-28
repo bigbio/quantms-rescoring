@@ -98,3 +98,42 @@ class TestSage:
         r = _reader()
         r.get_default_scores({"search_engine": "Sage"}, [], {"score": None})
         assert math.isinf(r.min_sage_hyperscore)
+
+
+import pandas as pd
+
+
+class TestWorstObservedScore:
+    """Regression: _worst_observed_score must not crash on an object-dtype score
+    column. np.isfinite raises on object arrays (even without a None), and a
+    null score arrives as Python None -> object dtype. This is the last-resort
+    sentinel fallback, so a rare degenerate merge must degrade, not crash.
+    """
+
+    def _reader_with_scores(self, values, high_score_better):
+        r = ParquetRescoringReader.__new__(ParquetRescoringReader)
+        r._psms_df = pd.DataFrame({"score": values})
+        r.high_score_better = high_score_better
+        return r
+
+    def test_object_dtype_with_none_lower_is_better(self):
+        r = self._reader_with_scores(pd.Series([0.01, float("inf"), None, 0.5], dtype=object), False)
+        assert r._worst_observed_score() == 0.5   # worst (max) of finite, not a crash
+
+    def test_object_dtype_with_none_higher_is_better(self):
+        r = self._reader_with_scores(pd.Series([5.0, float("inf"), None, 2.0], dtype=object), True)
+        assert r._worst_observed_score() == 2.0   # worst (min) of finite
+
+    def test_all_sentinel_or_null_returns_zero(self):
+        r = self._reader_with_scores(pd.Series([float("inf"), None], dtype=object), False)
+        assert r._worst_observed_score() == 0.0
+
+    def test_plain_float_column_still_works(self):
+        r = self._reader_with_scores([0.01, float("inf"), 0.5], False)
+        assert r._worst_observed_score() == 0.5
+
+    def test_no_score_column_returns_zero(self):
+        r = ParquetRescoringReader.__new__(ParquetRescoringReader)
+        r._psms_df = pd.DataFrame({"other": [1, 2]})
+        r.high_score_better = False
+        assert r._worst_observed_score() == 0.0
