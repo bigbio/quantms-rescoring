@@ -1,4 +1,3 @@
-import re
 import click
 import numpy as np
 from scipy.stats import entropy
@@ -228,25 +227,17 @@ def spectrum2feature(idparquet, mzml, output):
             logger.warning(f"Missing spectrum_reference at row {idx}")
             continue
 
-        # parse scan id
-        scan_match = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
-
-        if not scan_match:
-            logger.warning(f"Cannot parse scan: {spectrum_reference}")
-            continue
-
-        scan = int(scan_match[0][1])
-        spectrum_data = OpenMSHelper.get_peaks_by_scan(
-            scan,
+        spectrum = OpenMSHelper.get_spectrum_for_psm(
+            row,
             idparquet_reader.exp,
             idparquet_reader.spec_lookup,
         )
 
-        if spectrum_data is None:
-            logger.debug(f"No spectrum found for scan {scan}")
+        if spectrum is None:
+            logger.debug(f"No spectrum found for {spectrum_reference}")
             continue
 
-        mz_array, intensity_array = spectrum_data
+        mz_array, intensity_array = spectrum.get_peaks()
         try:
             metrics = SpectrumAnalyzer.compute_spectrum_metrics(
                 np.array(mz_array),
@@ -269,7 +260,7 @@ def spectrum2feature(idparquet, mzml, output):
             result_rows.append(record)
 
         except Exception as e:
-            logger.error(f"Failed spectrum {scan}: {e}")
+            logger.error(f"Failed spectrum {spectrum_reference}: {e}")
 
     idparquet_reader = update_search_parameter(idparquet_reader, added_features)
 
