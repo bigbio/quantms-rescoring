@@ -55,6 +55,7 @@ quantms-rescoring significantly enhances the capabilities of MS2PIP, AlphaPeptDe
 - **Intelligent Model Selection**: Automatically evaluates and selects the optimal MS2PIP model for each dataset based on fragmentation type and correlation quality. If the user-selected model performs poorly, the system will intelligently search for a better alternative.
 - **Adaptive MS2 Tolerance**: Dynamically adjusts MS2 tolerance based on the dataset characteristics, analyzing both reported and predicted tolerances to find the optimal setting.
 - **Correlation Validation**: Implements a robust validation system that ensures the selected model achieves sufficient correlation with experimental spectra, preventing the use of inappropriate models.
+  For multi-engine input, the MS2PIP calibration fraction uses target, rank-one PSMs with an observed primary-engine score. Candidates assigned an imputed primary score remain available for feature generation and rescoring, but do not enlarge the calibration set.
 - **Enhanced Spectrum Processing**: Uses OpenMS for spectrum file reading instead of ms2rescore_rs, providing better compatibility with a wider range of mzML files and formats.
 
 ### AlphaPeptDeep Innovations
@@ -317,7 +318,7 @@ quantms-rescoring is optimized for HPC/Slurm environments and Nextflow workflows
 
 #### Thread Configuration
 
-The tool uses a single `--processes` parameter that directly maps to available CPUs. Each process uses 1 internal thread to avoid thread explosion when using multiprocessing.
+The tool uses a single `--processes` parameter that directly maps to available CPUs. Each process uses 1 internal thread to avoid thread explosion when using multiprocessing. MS2PIP's Rust stage instead runs as many threads in one process, unless `RAYON_NUM_THREADS` is already set. It runs before the feature workers start, so `--processes` still bounds the busy CPUs.
 
 **For Nextflow workflows:**
 
@@ -413,11 +414,25 @@ For environments without internet access (e.g., HPC clusters), you can download 
 
 This command downloads models for:
 
-- **MS2PIP**: Fragment ion intensity prediction models (bundled with ms2pip package)
+- **MS2PIP**: Fragment ion intensity prediction models downloaded and validated against the installed MS2PIP model registry.
 - **AlphaPeptDeep**: MS2 spectrum, retention time, and CCS prediction models
 
 > **Note**: DeepLC does not require a separate model download — it is handled internally by the DeepLC package.
 Once downloaded, you can transfer the models to your offline environment and use them with the processing commands. For AlphaPeptDeep models, use the `--ms2_model_dir` option when running `msrescore2feature`.
+
+MS2PIP 4.2 accepts fragment tolerances in either `Da` or `ppm` through
+`msrescore2feature --ms2_tolerance <value> --ms2_tolerance_unit <unit>`.
+The OpenMS spectrum reader is retained, while spectrum annotation and prediction
+use the public MS2PIP API. The 71 MS2Rescore features keep their existing names;
+unavailable correlations count as unsuccessful predictions during model validation.
+`--processes` sets the Rust/XGBoost thread budget and the feature-worker count.
+Rust initializes its thread pool on the first calculation, so use a fresh CLI
+process when changing that budget.
+
+This upgrade does not promise identical features to MS2PIP 4.1.2. MS2PIP 4.2
+uses a different spectrum annotation backend, including nearest-m/z matching
+and neutral-loss annotations. Keep the MS2PIP version fixed when comparing
+rescoring results across runs.
 
 ### Issues and Contributions
 

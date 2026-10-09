@@ -41,7 +41,8 @@ configure_logging()
 @click.option(
     "--processes",
     help="Number of parallel processes (e.g., Nextflow's $task.cpus). "
-         "Each process uses 1 internal thread to avoid HPC resource contention. "
+         "Each process uses 1 internal thread to avoid HPC resource contention; "
+         "MS2PIP's Rust stage runs as many threads in one process instead. "
          "Default: 4",
     type=int,
     default=4,
@@ -184,7 +185,8 @@ def msrescore2feature(
         The logging level for the CLI command.
     processes : int
         The number of parallel processes available (e.g., Nextflow's $task.cpus).
-        Each process uses 1 internal thread for HPC safety.
+        Each process uses 1 internal thread for HPC safety; MS2PIP's Rust stage
+        runs as many threads in one process instead.
     feature_generators : str
         Comma-separated list of feature generators to use for annotation.
     only_features : str

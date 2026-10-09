@@ -157,13 +157,9 @@ class FeatureAnnotator:
         self._idparquet_protein_groups = None
 
         self._deepLC = "deeplc" in feature_annotators
-        if "ms2pip" in feature_annotators and ms2_tolerance_unit == "Da":
-            self._ms2pip = True
-        elif "ms2pip" in feature_annotators and ms2_tolerance_unit == "ppm":
-            raise ValueError(
-                "MS2PIP only supports Da units. Please remove 'ms2pip' from feature_generators or set ms2_tolerance_unit to 'Da'.")
-        else:
-            self._ms2pip = False
+        if ms2_tolerance_unit not in {"Da", "ppm"}:
+            raise ValueError("MS2 tolerance unit must be 'Da' or 'ppm'.")
+        self._ms2pip = "ms2pip" in feature_annotators
         if "alphapeptdeep" in feature_annotators:
             self._alphapeptdeep = True
         else:
@@ -473,6 +469,7 @@ class FeatureAnnotator:
         """
         return MS2PIPAnnotator(
             ms2_tolerance=tolerance or self._ms2_tolerance,
+            ms2_tolerance_unit=self._ms2_tolerance_unit,
             model=model or self._ms2_model,
             spectrum_path=self._idparquet_reader.spectrum_path,
             spectrum_id_pattern=self._spectrum_id_pattern,
@@ -550,18 +547,13 @@ class FeatureAnnotator:
                 logger.error(f"Failed to initialize AlphaPeptDeep: {e}")
                 raise
 
-        # Initialize MS2PIP annotator
-        if self._ms2_tolerance_unit == "Da":
-            try:
-                ms2pip_generator = self._create_ms2pip_annotator()
-                original_model = ms2pip_generator.model
-            except Exception as e:
-                logger.error(f"Failed to initialize MS2PIP: {e}")
-                raise
-        elif is_HCD:
-            original_model = alphapeptdeep_generator.model
-        else:
-            logger.error("Failed to initialize all models")
+        # Both predictors now accept the original Da or ppm tolerance.
+        try:
+            ms2pip_generator = self._create_ms2pip_annotator()
+            original_model = ms2pip_generator.model
+        except Exception as e:
+            logger.error(f"Failed to initialize MS2PIP: {e}")
+            raise
 
         # Get PSM list
         psm_list = self._idparquet_reader.psms
@@ -588,27 +580,10 @@ class FeatureAnnotator:
             else:
                 alphapeptdeep_best_model, alphapeptdeep_best_corr = None, -1
 
-            ms2pip_best_corr = -1  # Initial MS2PIP best correlation
-            ms2pip_best_model = None
+            logger.info("Running MS2PIP model")
+            ms2pip_best_model, ms2pip_best_corr = ms2pip_generator._find_best_ms2pip_model(calibration_set)
 
-            # Determine which model to use based on configuration and validation
-            if self._ms2_tolerance_unit == "Da":
-                # Save original model for reference
-                logger.info("Running MS2PIP model")
-                ms2pip_best_model, ms2pip_best_corr = ms2pip_generator._find_best_ms2pip_model(calibration_set)
-            else:
-                logger.info("MS2PIP model doesn't support ppm tolerance unit. Only consider AlphaPeptDeep model")
-
-            # When using ppm tolerance, only AlphaPeptDeep is supported
-            if self._ms2_tolerance_unit != "Da":
-                alphapeptdeep_original_model = alphapeptdeep_generator.model
-                if not self._validate_and_apply_alphapeptdeep_model(alphapeptdeep_generator, alphapeptdeep_best_model,
-                                                                    alphapeptdeep_best_corr, psm_list, psms_df,
-                                                                    alphapeptdeep_original_model):
-                    return  # Exit early since no valid model is available
-
-            # When using Da tolerance, compare AlphaPeptDeep and MS2PIP
-            elif is_HCD and alphapeptdeep_best_corr > ms2pip_best_corr:
+            if is_HCD and alphapeptdeep_best_corr > ms2pip_best_corr:
                 alphapeptdeep_original_model = alphapeptdeep_generator.model
                 if not self._validate_and_apply_alphapeptdeep_model(alphapeptdeep_generator, alphapeptdeep_best_model,
                                                                     alphapeptdeep_best_corr, psm_list, psms_df,
@@ -616,7 +591,7 @@ class FeatureAnnotator:
                     return  # Exit early since no valid model is available
 
             else:
-                # Use MS2PIP when Da tolerance and ms2pip has better correlation
+                # Use MS2PIP when it has the better correlation.
                 if ms2pip_best_model and ms2pip_generator.validate_features(psm_list=psm_list, model=ms2pip_best_model):
                     model_to_use = ms2pip_best_model
                     logger.info(f"Using best model: {model_to_use} with correlation: {ms2pip_best_corr:.4f}")

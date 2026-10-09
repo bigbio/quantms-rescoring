@@ -4,11 +4,12 @@ ms2rescore==3.2.1
 pandas
 numpy>=1.25
 deepLC==3.1.13
-psm-utils
+psm-utils==1.5.5
 scipy
 pygam
 protobuf
-ms2pip==4.1.2
+ms2pip==4.2.0
+ms2rescore-rs==0.5.0
 peptdeep==1.4.1
 psutil
 torch<2.10.0

@@ -33,7 +33,7 @@ from quantmsrescore.logging_config import get_logger
 logger = get_logger(__name__)
 
 OPENMS_DECOY_FIELD = "target_decoy"
-SPECTRUM_PATTERN = r"(spectrum|scan)=(\d+)"
+SPECTRUM_PATTERN = re.compile(r"(spectrum|scan|index)=(\d+)")
 
 # =============================================================================
 # Caching infrastructure for performance
@@ -224,8 +224,11 @@ def calculate_correlations(results: List[Any]) -> None:
     """
     for result in results:
         if result.predicted_intensity and result.observed_intensity:
-            pred_int = np.concatenate([i for i in result.predicted_intensity.values()])
-            obs_int = np.concatenate([i for i in result.observed_intensity.values()])
+            # Rust returns ion maps with unspecified insertion order. Align
+            # observed and predicted arrays by ion type, never by dict order.
+            ion_types = list(result.predicted_intensity)
+            pred_int = np.concatenate([result.predicted_intensity[ion] for ion in ion_types])
+            obs_int = np.concatenate([result.observed_intensity[ion] for ion in ion_types])
             result.correlation = np.corrcoef(pred_int, obs_int)[0][1]
         else:
             result.correlation = None
@@ -289,10 +292,13 @@ class OpenMSHelper:
         oms.MzMLFile().load(mzml_file, exp)
 
         lookup = SpectrumLookup()
-        if "spectrum=" in exp.getSpectrum(0).getNativeID():
-            lookup.readSpectra(exp, "spectrum=(?<SCAN>\\d+)")
+        native_id = exp.getSpectrum(0).getNativeID()
+        if "spectrum=" in native_id:
+            lookup.readSpectra(exp, r"spectrum=(?<SCAN>\d+)")
+        elif re.search(r"(?:^|\s)index=\d+", native_id):
+            lookup.readSpectra(exp, r"index=(?<SCAN>\d+)")
         else:
-            lookup.readSpectra(exp, "scan=(?<SCAN>\\d+)")
+            lookup.readSpectra(exp, r"scan=(?<SCAN>\d+)")
 
         return exp, lookup
 
@@ -306,7 +312,8 @@ class OpenMSHelper:
 
             Notes
             -----
-            It expects a spectrum reference string stored in Parquet (e.g. scan=1234 or spectrum=1234).
+            It expects a spectrum reference string stored in Parquet (e.g.
+            ``scan=1234``, ``spectrum=1234`` or ``index=1234``).
             """
 
         # -------- 1. extract spectrum reference --------
@@ -319,24 +326,28 @@ class OpenMSHelper:
             logger.warning(f"Missing spectrum reference for PSM: {psm}")
             return None
 
-        # -------- 2. parse scan number --------
-        matches = re.findall(r"(spectrum|scan)=(\d+)", str(spectrum_reference))
+        # -------- 2. parse spectrum reference --------
+        matches = SPECTRUM_PATTERN.findall(str(spectrum_reference))
         if not matches:
             logger.warning(f"Invalid spectrum reference format: {spectrum_reference}")
             return None
 
-        scan_number = int(matches[0][1])
+        reference_type, reference_value = matches[0]
 
         # -------- 3. retrieve spectrum --------
         try:
-            index = lookup.findByScanNumber(scan_number)
+            if reference_type == "index":
+                # Native IDs need not equal zero-based vector positions;
+                # TDF-converted mzML files can start at ``index=1``.
+                index = lookup.findByNativeID(f"index={reference_value}")
+            else:
+                index = lookup.findByScanNumber(int(reference_value))
             spectrum = exp.getSpectrum(index)
             return spectrum
 
         except Exception as e:
             logger.error(
-                "Error retrieving spectrum for scan=%s, reference=%s: %s",
-                scan_number,
+                "Error retrieving spectrum for reference=%s: %s",
                 spectrum_reference,
                 e,
             )
