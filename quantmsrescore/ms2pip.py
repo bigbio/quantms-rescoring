@@ -1,256 +1,86 @@
-import itertools
-import multiprocessing
-import re
-from collections import defaultdict
+import os
+from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
-from typing import Optional, Tuple, List, Union, Callable, Generator, Dict
+from typing import Generator, List, Optional, Tuple, Union
 
+import ms2pip
 import ms2pip.exceptions as exceptions
 import numpy as np
-from math import ceil
-from ms2pip._cython_modules import ms2pip_pyx
-from ms2pip._utils.encoder import Encoder
-from ms2pip._utils.ion_mobility import IonMobility
 from ms2pip._utils.psm_input import read_psms
-from ms2pip._utils.retention_time import RetentionTime
-from ms2pip.constants import MODELS
-from ms2pip.core import _Parallelized, _process_peptidoform
 from ms2pip.exceptions import NoMatchingSpectraFound
 from ms2pip.result import ProcessingResult
 from ms2pip.spectrum import ObservedSpectrum
 from ms2rescore.feature_generators import MS2PIPFeatureGenerator
 from ms2rescore.feature_generators.base import FeatureGeneratorException
 from ms2rescore.utils import infer_spectrum_path
-from psm_utils import PSMList, PSM
+from ms2rescore_rs import MS2Spectrum, Precursor
+from psm_utils import Peptidoform, PSMList
 
-from quantmsrescore.constants import SUPPORTED_MODELS_MS2PIP
-from quantmsrescore.exceptions import Ms2pipIncorrectModelException
-from quantmsrescore.logging_config import get_logger, configure_worker_process
+from quantmsrescore.constants import PRIMARY_SCORE_IMPUTED, SUPPORTED_MODELS_MS2PIP
+from quantmsrescore.logging_config import get_logger
 from quantmsrescore.openms import (
     OpenMSHelper,
+    calculate_correlations,
     get_compiled_regex,
     organize_psms_by_spectrum_id,
-    calculate_correlations,
 )
+from quantmsrescore.utils import worker_pool
 
-# Get logger for this module
 logger = get_logger(__name__)
 
-# Timeout for pool.get() operations in seconds (1 hour per chunk)
-_POOL_GET_TIMEOUT = 3600
 
+@contextmanager
+def _rayon_threads(threads: int):
+    """Cap MS2PIP's Rust threads for one call unless RAYON_NUM_THREADS is already set.
 
-class PatchParallelized(_Parallelized):
+    MS2PIP annotates spectra in Rust before its own thread setting, and Rayon
+    sizes its thread pool at the first parallel call, so the cap must come first.
+    The variable is removed afterwards so later stages and workers do not inherit it.
     """
-    Extended version of _Parallelized that supports custom spectrum file reading using pyopenms instead of
-    ms2rescore_rs. We need to read the files using OpenMS mzML handler rather than mzdata tools in rust because if
-    the mzML doesn't work on this component, it will not work on quantms but if it not works on mzdata is not in our control
-    to changed and those fails may be supported and OK in quantms.
-    See example in issue:
-    """
-
-    def __init__(self, encoder,
-                 model=None,
-                 model_dir=None,
-                 ms2_tolerance=0.02,
-                 processes=None):
-        """
-        Initialize with all original parameters plus a custom spectrum reader.
-
-        Parameters
-        ----------
-        encoder:
-            Encoder object to use for encoding peptides.
-        model:
-            MS²PIP model to use for scoring.
-        model_dir:
-            Directory containing model files.
-        ms2_tolerance:
-            MS² tolerance in Da.
-        processes:
-            Number of processes to use for parallelization.
-        """
-        super().__init__(
-            encoder=encoder,
-            model=model,
-            model_dir=model_dir,
-            ms2_tolerance=ms2_tolerance,
-            processes=processes,
-        )
-
-    def process_spectra(
-            self,
-            psm_list,
-            spectrum_file,
-            spectrum_id_pattern,
-            vector_file=False,
-            annotations_only=False,
-    ):
-        """
-        Override process_spectra to use our custom spectrum reader
-        """
-        # Validate runs and collections
-        if not len(psm_list.collections) == 1 or not len(psm_list.runs) == 1:
-            raise exceptions.InvalidInputError("PSMs should be for a single run and collection.")
-
-        # Define our custom _process_spectra function that uses our reader
-        # Use our custom function with the execute_in_pool method
-        args = (
-            spectrum_file,
-            vector_file,
-            self.encoder,
-            self.model,
-            self.ms2_tolerance,
-            spectrum_id_pattern,
-            annotations_only,
-        )
-
-        results = self._execute_in_pool(psm_list, _custom_process_spectra, args)
-
-        # Validate number of results
-        if not results:
-            raise exceptions.NoMatchingSpectraFound(
-                "No spectra matching spectrum IDs from PSM list could be found in provided file."
-            )
-        logger.debug(f"Gathered data for {len(results)} PSMs.")
-
-        # Add XGBoost predictions if required
-        if (
-                not (vector_file or annotations_only)
-                and "xgboost_model_files" in MODELS[self.model].keys()
-        ):
-            results = self._add_xgboost_predictions(results)
-
-        return results
-
-    def _execute_in_pool(self, psm_list: PSMList, func: Callable, args: tuple):
-        """Execute function in multiprocessing pool."""
-
-        def get_chunk_size(n_items, n_processes):
-            """Get optimal chunk size for multiprocessing."""
-            if n_items < 5000:
-                return n_items
-            max_chunk_size = 50000
-            n_chunks = ceil(ceil(n_items / n_processes) / max_chunk_size) * n_processes
-            return ceil(n_items / n_chunks)
-
-        def to_chunks(_list, chunk_size):
-            """Split _list into chunks of size chunk_size."""
-
-            def _generate_chunks():
-                for i in range(0, len(_list), chunk_size):
-                    yield _list[i: i + chunk_size]
-
-            _list = list(_list)
-            return list(_generate_chunks())
-
-        def _enumerated_psm_list_by_spectrum_id(psm_list, spectrum_ids_chunk):
-            selected_indices = np.flatnonzero(np.isin(psm_list["spectrum_id"], spectrum_ids_chunk))
-            return [(i, psm_list.psm_list[i]) for i in selected_indices]
-
-        with self._get_pool() as pool:
-            if not psm_list:
-                logger.warning("No PSMs to process.")
-                return []
-
-            logger.info(
-                "The Pool number of process {} and CPUs {}".format(
-                    pool._processes, multiprocessing.cpu_count()
-                )
-            )
-
-            # Split PSMList into chunks
-            if func == _custom_process_spectra:
-                # Split by spectrum_id to keep PSMs for same spectrum together
-                spectrum_ids = set(psm_list["spectrum_id"])
-                chunk_size = get_chunk_size(len(spectrum_ids), pool._processes)
-                chunks = [
-                    _enumerated_psm_list_by_spectrum_id(psm_list, spectrum_ids_chunk)
-                    for spectrum_ids_chunk in to_chunks(spectrum_ids, chunk_size)
-                ]
-            else:
-                # Simple split by PSM
-                chunk_size = get_chunk_size(len(psm_list), pool._processes)
-                chunks = to_chunks(list(enumerate(psm_list)), chunk_size)
-
-            logger.info(f"Processing {len(chunks)} chunk(s) of ~{chunk_size} entries each.")
-
-            # Add jobs to pool
-            mp_results = [
-                pool.apply_async(func, args=(psm_list_chunk, *args)) for psm_list_chunk in chunks
-            ]
-            try:
-                results = [r.get(timeout=_POOL_GET_TIMEOUT) for r in mp_results]
-            except multiprocessing.TimeoutError:
-                logger.error(f"Pool operation timed out after {_POOL_GET_TIMEOUT} seconds")
-                pool.terminate()
-                raise
-
-            pool.close()
-            pool.join()
-
-        # Sort results by input order
-        results = sorted(
-            itertools.chain.from_iterable(results), key=lambda result: result.psm_index
-        )
-
-        return results
-
-    def _get_pool(self):
-        """Get multiprocessing pool with recursion protection."""
-        logger.debug(f"Starting workers (processes={self.processes})...")
-
-        if multiprocessing.current_process().daemon:
-            logger.warning(
-                "Running in a daemon process. Disabling multiprocessing as daemonic processes cannot have children."
-            )
-            return multiprocessing.dummy.Pool(1)
-
-        if self.processes == 1:
-            logger.debug("Using dummy multiprocessing pool.")
-            return multiprocessing.dummy.Pool(1)
-
-        # Check if already inside a worker process
-        if multiprocessing.parent_process() is not None:
-            logger.warning(
-                "Attempting to create a pool inside a worker process! Returning a dummy pool instead."
-            )
-            return multiprocessing.dummy.Pool(1)
-
-        return multiprocessing.get_context("spawn").Pool(
-            self.processes,
-            initializer=configure_worker_process
-        )
+    if "RAYON_NUM_THREADS" in os.environ:
+        yield
+        return
+    os.environ["RAYON_NUM_THREADS"] = str(threads)
+    try:
+        yield
+    finally:
+        os.environ.pop("RAYON_NUM_THREADS", None)
 
 
 class MS2PIPAnnotator(MS2PIPFeatureGenerator):
 
     def __init__(
-            self,
-            *args,
-            model: str = "HCD",
-            ms2_tolerance: float = 0.02,
-            spectrum_path: Optional[str] = None,
-            spectrum_id_pattern: str = "(.*)",
-            model_dir: Optional[str] = None,
-            processes: int = 1,
-            calibration_set_size: Optional[float] = 0.20,
-            valid_correlations_size: Optional[float] = 0.70,
-            correlation_threshold: Optional[float] = 0.6,
-            higher_score_better: bool = True,
-            force_model: bool = False,
-            **kwargs,
+        self,
+        *args,
+        model: str = "HCD",
+        ms2_tolerance: float = 0.02,
+        ms2_tolerance_unit: str = "Da",
+        spectrum_path: Optional[str] = None,
+        spectrum_id_pattern: str = "(.*)",
+        model_dir: Optional[str] = None,
+        processes: int = 1,
+        calibration_set_size: Optional[float] = 0.20,
+        valid_correlations_size: Optional[float] = 0.70,
+        correlation_threshold: Optional[float] = 0.6,
+        higher_score_better: bool = True,
+        force_model: bool = False,
+        **kwargs,
     ):
+        if ms2_tolerance_unit not in {"Da", "ppm"}:
+            raise ValueError("MS2 tolerance unit must be 'Da' or 'ppm'.")
+        if processes < 1:
+            raise ValueError("processes must be a positive integer.")
+        self.ms2_tolerance_unit = ms2_tolerance_unit
         super().__init__(
-            args,
+            *args,
             model=model,
             ms2_tolerance=ms2_tolerance,
             spectrum_path=spectrum_path,
             spectrum_id_pattern=spectrum_id_pattern,
             model_dir=model_dir,
             processes=processes,
-            kwargs=kwargs,
+            **kwargs,
         )
         self._calibration_set_size: float = calibration_set_size
         self._valid_correlations_size: float = valid_correlations_size
@@ -289,6 +119,7 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
                         spectrum_id_pattern=self.spectrum_id_pattern,
                         model=model,
                         ms2_tolerance=self.ms2_tolerance,
+                        ms2_tolerance_unit=self.ms2_tolerance_unit,
                         compute_correlations=True,
                         model_dir=self.model_dir,
                         processes=self.processes,
@@ -340,6 +171,7 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
                         spectrum_id_pattern=self.spectrum_id_pattern,
                         model=self.model,
                         ms2_tolerance=self.ms2_tolerance,
+                        ms2_tolerance_unit=self.ms2_tolerance_unit,
                         compute_correlations=True,
                         model_dir=self.model_dir,
                         processes=self.processes,
@@ -356,12 +188,12 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
                 current_run += 1
 
     def _validate_scores(
-            self,
-            ms2pip_results,
-            calibration_set_size,
-            valid_correlations_size,
-            correlation_threshold,
-            higher_score_better,
+        self,
+        ms2pip_results,
+        calibration_set_size,
+        valid_correlations_size,
+        correlation_threshold,
+        higher_score_better,
     ) -> bool:
         """
         Validate MS²PIP results based on score and correlation criteria.
@@ -397,23 +229,36 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
             ms2pip_results.copy()
         )  # Copy ms2pip results to avoid modifying the original list
 
-        # Select only PSMs that are target and not decoys
+        # The calibration fraction is relative to observed primary scores.
+        # Other engines' candidates receive an imputed primary score during
+        # merging; counting them would enlarge this engine's top-scoring set.
+        # They remain in the full PSM list for feature generation and rescoring.
         ms2pip_results_copy = [
             result
             for result in ms2pip_results_copy
             if not result.psm.is_decoy and result.psm.rank == 1
+            and (result.psm.metadata or {}).get(PRIMARY_SCORE_IMPUTED) != "true"
         ]
         # Sort ms2pip results by PSM score and lower score is better
         ms2pip_results_copy.sort(key=lambda x: x.psm.score, reverse=higher_score_better)
 
         # Get a calibration set, the % of psms to be used for calibrarion is defined by calibration_set_size
         calibration_set = ms2pip_results_copy[
-                          : int(len(ms2pip_results_copy) * calibration_set_size)
-                          ]
+            : int(len(ms2pip_results_copy) * calibration_set_size)
+        ]
 
-        # Select the results with correlation above the threshold
+        if not calibration_set:
+            logger.info("No target PSMs available in the model calibration set.")
+            return False
+
+        # Invalid predictions remain in the denominator, rather than making a
+        # model appear better by silently dropping failed PSMs.
         valid_correlation = [
-            psm for psm in calibration_set if psm.correlation >= correlation_threshold
+            psm
+            for psm in calibration_set
+            if psm.correlation is not None
+            and np.isfinite(psm.correlation)
+            and psm.correlation >= correlation_threshold
         ]
 
         logger.info(
@@ -427,7 +272,7 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
         return True
 
     def _find_best_ms2pip_model(
-            self, batch_psms: PSMList, known_fragmentation: Optional[str] = None
+        self, batch_psms: PSMList, known_fragmentation: Optional[str] = None
     ) -> Tuple[str, float]:
         """
         Find the best MS²PIP model for a batch of PSMs.
@@ -464,6 +309,7 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
                     spectrum_id_pattern=self.spectrum_id_pattern,
                     model=model,
                     ms2_tolerance=self.ms2_tolerance,
+                    ms2_tolerance_unit=self.ms2_tolerance_unit,
                     compute_correlations=True,
                     model_dir=self.model_dir,
                     processes=self.processes,
@@ -493,71 +339,128 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
         float
             The average correlation score of the provided MS²PIP results.
         """
+        if not ms2pip_results:
+            return 0.0
         total_correlation = sum(
             [
                 psm.correlation
                 for psm in ms2pip_results
-                if psm.correlation is not None and not np.isnan(psm.correlation)
+                if psm.correlation is not None and np.isfinite(psm.correlation)
             ]
         )
         return total_correlation / len(ms2pip_results)
 
+    def _calculate_features(
+        self, psm_list: PSMList, ms2pip_results: List[ProcessingResult]
+    ) -> None:
+        """Keep upstream features, without forking an initialized Rust thread pool."""
+        failed = 0
+        with worker_pool(self.processes) as pool:
+            features = pool.imap(
+                self._calculate_features_single, ms2pip_results, chunksize=1000
+            )
+            for result, values in zip(ms2pip_results, features):
+                if values:
+                    psm = psm_list[result.psm_index]
+                    if psm.rescoring_features is None:
+                        psm.rescoring_features = {}
+                    psm.rescoring_features.update(values)
+                else:
+                    failed += 1
+        if failed:
+            logger.warning(f"Failed to calculate features for {failed} PSMs")
+
     def custom_correlate(
-            self,
-            psms: Union[PSMList, str, Path],
-            spectrum_file: Union[str, Path],
-            psm_filetype: Optional[str] = None,
-            spectrum_id_pattern: Optional[str] = None,
-            compute_correlations: bool = False,
-            add_retention_time: bool = False,
-            add_ion_mobility: bool = False,
-            model: Optional[str] = "HCD",
-            model_dir: Optional[Union[str, Path]] = None,
-            ms2_tolerance: float = 0.02,
-            processes: Optional[int] = None,
+        self,
+        psms: Union[PSMList, str, Path],
+        spectrum_file: Union[str, Path],
+        psm_filetype: Optional[str] = None,
+        spectrum_id_pattern: Optional[str] = None,
+        compute_correlations: bool = False,
+        add_retention_time: bool = False,
+        add_ion_mobility: bool = False,
+        model: str = "HCD",
+        model_dir: Optional[Union[str, Path]] = None,
+        ms2_tolerance: float = 0.02,
+        ms2_tolerance_unit: Optional[str] = None,
+        processes: Optional[int] = None,
     ) -> List[ProcessingResult]:
-        """
-        Custom implementation of correlate that uses our custom spectrum reader.
-        """
+        """Read spectra with OpenMS and use MS2PIP's public, unit-aware API."""
         psm_list = read_psms(psms, filetype=psm_filetype)
-        spectrum_id_pattern = spectrum_id_pattern if spectrum_id_pattern else "(.*)"
+        if not psm_list:
+            raise NoMatchingSpectraFound("No PSMs to match to spectra.")
+        if len(psm_list.collections) != 1 or len(psm_list.runs) != 1:
+            raise exceptions.InvalidInputError("PSMs should be for a single run and collection.")
+        spectrum_id_pattern = spectrum_id_pattern or "(.*)"
+        spectrum_id_regex = get_compiled_regex(spectrum_id_pattern)
+        by_spectrum = organize_psms_by_spectrum_id(list(enumerate(psm_list)))
+        matched = {}
+        for spectrum in read_spectrum_file(str(spectrum_file)):
+            match = spectrum_id_regex.search(spectrum.identifier)
+            try:
+                spectrum_id = match[1]
+            except (TypeError, IndexError) as exc:
+                raise exceptions.TitlePatternError(
+                    f"Spectrum title pattern `{spectrum_id_pattern}` could not be matched to "
+                    f"spectrum ID `{spectrum.identifier}`. A capturing group is required."
+                ) from exc
+            if spectrum_id not in by_spectrum:
+                continue
+            raw_spectrum = MS2Spectrum(
+                identifier=spectrum.identifier,
+                mz=spectrum.mz,
+                intensity=spectrum.intensity,
+                precursor=Precursor(
+                    mz=spectrum.precursor_mz,
+                    charge=int(spectrum.precursor_charge),
+                    rt=spectrum.retention_time,
+                ),
+            )
+            for index, psm in by_spectrum[spectrum_id]:
+                copied = psm.model_copy(update={"spectrum": raw_spectrum})
+                if not copied.peptidoform.precursor_charge:
+                    copied.peptidoform = Peptidoform(
+                        f"{copied.peptidoform.modified_sequence}/{int(spectrum.precursor_charge)}"
+                    )
+                matched[index] = copied
+        if not matched:
+            raise NoMatchingSpectraFound("No spectra matching spectrum IDs from PSM list.")
 
-        if add_retention_time:
-            logger.info("Adding retention time predictions")
-            rt_predictor = RetentionTime(processes=processes)
-            rt_predictor.add_rt_predictions(psm_list)
-
-        if add_ion_mobility:
-            logger.info("Adding ion mobility predictions")
-            im_predictor = IonMobility(processes=processes)
-            im_predictor.add_im_predictions(psm_list)
-
-        with Encoder.from_psm_list(psm_list) as encoder:
-            # Use our custom parallelized class with our spectrum reader
-            custom_parallelized = PatchParallelized(
-                encoder=encoder,
+        indices = sorted(matched)
+        workers = processes if processes is not None else self.processes
+        with _rayon_threads(workers):
+            results = ms2pip.correlate(
+                psms=PSMList(psm_list=[matched[index] for index in indices]),
+                spectrum_file=None,
                 model=model,
                 model_dir=model_dir,
                 ms2_tolerance=ms2_tolerance,
-                processes=processes,
+                ms2_tolerance_mode=ms2_tolerance_unit or self.ms2_tolerance_unit,
+                processes=workers,
+                compute_correlations=False,
+                add_retention_time=add_retention_time,
+                add_ion_mobility=add_ion_mobility,
             )
+        for result in results:
+            result.psm_index = indices[result.psm_index]
+            # Do not retain Rust spectrum objects in feature worker arguments.
+            result.psm = psm_list[result.psm_index]
+        results.sort(key=lambda result: result.psm_index)
+        if compute_correlations:
+            calculate_correlations(results)
+            correlations = [
+                r.correlation
+                for r in results
+                if r.correlation is not None and np.isfinite(r.correlation)
+            ]
+            if correlations:
+                logger.info(f"Median correlation: {np.median(correlations)}, model {model}")
+        return results
 
-            logger.info("Processing spectra and peptides with custom reader...")
-            results = custom_parallelized.process_spectra(
-                psm_list, spectrum_file, spectrum_id_pattern
-            )
 
-            # Correlations also requested
-            if compute_correlations:
-                calculate_correlations(results)
-                logger.info(
-                    f"Median correlation: {np.median([r.correlation for r in results if r.correlation is not None and not np.isnan(r.correlation)])}, model {model}"
-                )
-
-            return results
-
-
-def read_spectrum_file(spec_file: str, use_cache: bool = True) -> Generator[ObservedSpectrum, None, None]:
+def read_spectrum_file(
+    spec_file: str, use_cache: bool = True
+) -> Generator[ObservedSpectrum, None, None]:
     """
     Read MS2 spectra from a supported file format; inferring the type from the filename extension.
 
@@ -610,270 +513,10 @@ def read_spectrum_file(spec_file: str, use_cache: bool = True) -> Generator[Obse
                 retention_time=float(rt),
             )
         if (
-                obs_spectrum is None
-                or obs_spectrum.identifier == ""
-                or obs_spectrum.mz.shape[0] == 0
-                or obs_spectrum.intensity.shape[0] == 0
+            obs_spectrum is None
+            or obs_spectrum.identifier == ""
+            or obs_spectrum.mz.shape[0] == 0
+            or obs_spectrum.intensity.shape[0] == 0
         ):
             continue
         yield obs_spectrum
-
-
-def _preprocess_spectrum(spectrum: ObservedSpectrum, model: str) -> None:
-    """
-    Preprocess a spectrum by removing reporter ions, normalizing, and transforming.
-
-    Parameters
-    ----------
-    spectrum
-        The spectrum to preprocess.
-    model
-        The model name, used to determine if reporter ions should be removed.
-    """
-    # Remove reporter ions if needed
-    for label_type in ["iTRAQ", "TMT"]:
-        if label_type in model:
-            spectrum.remove_reporter_ions(label_type)
-
-    spectrum.tic_norm()
-    spectrum.log2_transform()
-
-
-def _get_targets_for_psm(
-        psm: PSM,
-        spectrum: ObservedSpectrum,
-        encoder: Encoder,
-        ms2_tolerance: float,
-        model: str,
-        ion_types: List[str],
-) -> Tuple[Optional[np.ndarray], Dict[str, np.ndarray]]:
-    """
-    Get targets for a PSM from a spectrum.
-
-    Parameters
-    ----------
-    psm
-        The PSM to get targets for.
-    spectrum
-        The spectrum to get targets from.
-    encoder
-        The encoder to use for peptide and peptidoform encoding.
-    ms2_tolerance
-        The MS2 tolerance to use.
-    model
-        The model name.
-    ion_types
-        The ion types to use.
-
-    Returns
-    -------
-    Tuple[Optional[np.ndarray], Dict[str, np.ndarray]]
-        A tuple containing the encoded peptidoform and the targets.
-    """
-    try:
-        enc_peptidoform = encoder.encode_peptidoform(psm.peptidoform)
-    except exceptions.InvalidAminoAcidError as e:
-        logger.debug(f"Invalid amino acid in peptidoform {psm.peptidoform}: {e}")
-        return None, {}
-
-    # Get targets
-    targets = ms2pip_pyx.get_targets(
-        enc_peptidoform,
-        spectrum.mz.astype(np.float32),
-        spectrum.intensity.astype(np.float32),
-        float(ms2_tolerance),
-        MODELS[model]["peaks_version"],
-    )
-    targets = {i: np.array(t, dtype=np.float32) for i, t in zip(ion_types, targets)}
-
-    # Set precursor charge if not set
-    if not psm.peptidoform.precursor_charge:
-        psm.peptidoform.precursor_charge = spectrum.precursor_charge
-
-    return enc_peptidoform, targets
-
-
-def _create_result_for_mode(
-        psm_index: int,
-        psm: PSM,
-        enc_peptidoform: np.ndarray,
-        targets: Dict[str, np.ndarray],
-        vector_file: bool,
-        annotations_only: bool,
-        model: str,
-        encoder: Encoder,
-        ion_types: List[str],
-) -> ProcessingResult:
-    """
-    Create a ProcessingResult based on the processing mode.
-
-    Parameters
-    ----------
-    psm_index
-        The index of the PSM.
-    psm
-        The PSM.
-    enc_peptidoform
-        The encoded peptidoform.
-    targets
-        The targets.
-    vector_file
-        Whether to extract feature vectors.
-    annotations_only
-        Whether to extract only annotations.
-    model
-        The model name.
-    encoder
-        The encoder.
-    ion_types
-        The ion types.
-
-    Returns
-    -------
-    ProcessingResult
-        The processing result.
-    """
-    if vector_file:
-        # Extract feature vectors
-        enc_peptide = encoder.encode_peptide(psm.peptidoform)
-        feature_vectors = np.array(
-            ms2pip_pyx.get_vector(enc_peptide, enc_peptidoform, psm.peptidoform.precursor_charge),
-            dtype=np.uint16,
-        )
-        return ProcessingResult(
-            psm_index=psm_index,
-            psm=psm,
-            theoretical_mz=None,
-            predicted_intensity=None,
-            observed_intensity=targets,
-            correlation=None,
-            feature_vectors=feature_vectors,
-        )
-    elif annotations_only:
-        # Extract only annotations
-        mz = ms2pip_pyx.get_mzs(enc_peptidoform, MODELS[model]["peaks_version"])
-        mz = {i: np.array(mz, dtype=np.float32) for i, mz in zip(ion_types, mz)}
-
-        return ProcessingResult(
-            psm_index=psm_index,
-            psm=psm,
-            theoretical_mz=mz,
-            predicted_intensity=None,
-            observed_intensity=targets,
-            correlation=None,
-            feature_vectors=None,
-        )
-    else:
-        # Predict with C model or get feature vectors for XGBoost
-        try:
-            result = _process_peptidoform(psm_index, psm, model, encoder, ion_types)
-        except (
-                exceptions.InvalidPeptidoformError,
-                exceptions.InvalidAminoAcidError,
-        ) as e:
-            logger.debug(f"Invalid peptidoform for PSM index {psm_index}: {e}")
-            result = ProcessingResult(psm_index=psm_index, psm=psm)
-        else:
-            result.observed_intensity = targets
-
-        return result
-
-
-def _custom_process_spectra(
-        enumerated_psm_list: List[Tuple[int, PSM]],
-        spec_file: str,
-        vector_file: bool,
-        encoder: Encoder,
-        model: str,
-        ms2_tolerance: float,
-        spectrum_id_pattern: str,
-        annotations_only: bool = False,
-) -> List[ProcessingResult]:
-    """
-    Perform requested tasks for each spectrum in spectrum file.
-
-    Parameters
-    ----------
-    enumerated_psm_list
-        List of tuples of (index, PSM) for each PSM in the input file.
-    spec_file
-        Filename of spectrum file
-    vector_file
-        If feature vectors should be extracted instead of predictions
-    encoder: Encoder
-        Configured encoder to use for peptide and peptidoform encoding
-    model
-        Name of prediction model to be used
-    ms2_tolerance
-        Fragmentation spectrum m/z error tolerance in Dalton
-    spectrum_id_pattern
-        Regular expression pattern to apply to spectrum titles before matching to
-        peptide file entries
-    annotations_only
-        If only peak annotations should be extracted from the spectrum file
-
-    Returns
-    -------
-    List[ProcessingResult]
-        List of processing results.
-    """
-    # Initialize MS2PIP
-    ms2pip_pyx.ms2pip_init(*encoder.encoder_files)
-    results = []
-    ion_types = [it.lower() for it in MODELS[model]["ion_types"]]
-
-    # Get cached compiled regex for spectrum ID matching
-    spectrum_id_regex = get_compiled_regex(spectrum_id_pattern)
-
-    # Organize PSMs by spectrum ID
-    psms_by_specid = organize_psms_by_spectrum_id(enumerated_psm_list)
-
-    # Process each spectrum
-    for spectrum in read_spectrum_file(spec_file):
-        # Match spectrum ID with provided regex
-        match = spectrum_id_regex.search(spectrum.identifier)
-        try:
-            spectrum_id = match[1]
-        except (TypeError, IndexError):
-            raise exceptions.TitlePatternError(
-                f"Spectrum title pattern `{spectrum_id_pattern}` could not be matched to "
-                f"spectrum ID `{spectrum.identifier}`. "
-                " Are you sure that the regex contains a capturing group?"
-            )
-
-        # Skip if no matching PSMs
-        if spectrum_id not in psms_by_specid:
-            continue
-
-        # Preprocess spectrum
-        _preprocess_spectrum(spectrum, model)
-
-        # Process each PSM for this spectrum
-        for psm_index, psm in psms_by_specid[spectrum_id]:
-            # Get targets for PSM
-            enc_peptidoform, targets = _get_targets_for_psm(
-                psm, spectrum, encoder, ms2_tolerance, model, ion_types
-            )
-
-            # Skip if encoding failed
-            if enc_peptidoform is None:
-                result = ProcessingResult(psm_index=psm_index, psm=psm)
-                results.append(result)
-                continue
-
-            # Create result based on processing mode
-            result = _create_result_for_mode(
-                psm_index,
-                psm,
-                enc_peptidoform,
-                targets,
-                vector_file,
-                annotations_only,
-                model,
-                encoder,
-                ion_types,
-            )
-
-            results.append(result)
-
-    return results

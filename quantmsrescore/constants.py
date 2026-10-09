@@ -1,3 +1,5 @@
+PRIMARY_SCORE_IMPUTED = "quantms:primary_score_imputed"
+
 MS2PIP_FEATURES = {
     "MS2PIP:SpecPearson": "spec_pearson",
     "MS2PIP:SpecCosineNorm": "cos_norm",

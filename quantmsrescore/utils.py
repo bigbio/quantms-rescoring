@@ -1,5 +1,8 @@
+import multiprocessing
+import multiprocessing.dummy
+
 # Get logger for this module
-from quantmsrescore.logging_config import get_logger
+from quantmsrescore.logging_config import configure_worker_process, get_logger
 from collections import defaultdict
 from pathlib import Path
 from typing import Union, List, Optional, Dict, Tuple, DefaultDict
@@ -13,6 +16,40 @@ import uuid
 import numpy as np
 
 logger = get_logger(__name__)
+
+
+def worker_pool(processes: int):
+    """Get a spawn pool for feature workers, with recursion/daemon protection.
+
+    Daemonic processes cannot have children, and a pool inside a pool worker
+    would multiply the processes, so both get a one-thread dummy pool instead.
+    """
+    processes = int(processes)
+    logger.debug(f"Starting workers (processes={processes})...")
+
+    if multiprocessing.current_process().daemon:
+        logger.warning(
+            "Running in a daemon process. Disabling multiprocessing as daemonic "
+            "processes cannot have children."
+        )
+        return multiprocessing.dummy.Pool(1)
+
+    if processes == 1:
+        logger.debug("Using dummy multiprocessing pool.")
+        return multiprocessing.dummy.Pool(1)
+
+    # Check if already inside a worker process
+    if multiprocessing.parent_process() is not None:
+        logger.warning(
+            "Attempting to create a pool inside a worker process! "
+            "Returning a dummy pool instead."
+        )
+        return multiprocessing.dummy.Pool(1)
+
+    return multiprocessing.get_context("spawn").Pool(
+        processes,
+        initializer=configure_worker_process
+    )
 
 
 class SpectrumStats:
