@@ -1,6 +1,5 @@
-import multiprocessing
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple, Union
@@ -19,15 +18,34 @@ from ms2rescore_rs import MS2Spectrum, Precursor
 from psm_utils import Peptidoform, PSMList
 
 from quantmsrescore.constants import PRIMARY_SCORE_IMPUTED, SUPPORTED_MODELS_MS2PIP
-from quantmsrescore.logging_config import configure_worker_process, get_logger
+from quantmsrescore.logging_config import get_logger
 from quantmsrescore.openms import (
     OpenMSHelper,
     calculate_correlations,
     get_compiled_regex,
     organize_psms_by_spectrum_id,
 )
+from quantmsrescore.utils import worker_pool
 
 logger = get_logger(__name__)
+
+
+@contextmanager
+def _rayon_threads(threads: int):
+    """Cap MS2PIP's Rust threads for one call unless RAYON_NUM_THREADS is already set.
+
+    MS2PIP annotates spectra in Rust before its own thread setting, and Rayon
+    sizes its thread pool at the first parallel call, so the cap must come first.
+    The variable is removed afterwards so later stages and workers do not inherit it.
+    """
+    if "RAYON_NUM_THREADS" in os.environ:
+        yield
+        return
+    os.environ["RAYON_NUM_THREADS"] = str(threads)
+    try:
+        yield
+    finally:
+        os.environ.pop("RAYON_NUM_THREADS", None)
 
 
 class MS2PIPAnnotator(MS2PIPFeatureGenerator):
@@ -53,9 +71,6 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
             raise ValueError("MS2 tolerance unit must be 'Da' or 'ppm'.")
         if processes < 1:
             raise ValueError("processes must be a positive integer.")
-        # MS2PIP annotates spectra in Rust before its own thread configuration.
-        # Set the Rayon budget before that first parallel operation.
-        os.environ["RAYON_NUM_THREADS"] = str(processes)
         self.ms2_tolerance_unit = ms2_tolerance_unit
         super().__init__(
             *args,
@@ -339,19 +354,10 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
         self, psm_list: PSMList, ms2pip_results: List[ProcessingResult]
     ) -> None:
         """Keep upstream features, without forking an initialized Rust thread pool."""
-        pool_context = (
-            multiprocessing.get_context("spawn").Pool(
-                self.processes, initializer=configure_worker_process
-            )
-            if self.processes > 1
-            else nullcontext(None)
-        )
         failed = 0
-        with pool_context as pool:
-            features = (
-                pool.imap(self._calculate_features_single, ms2pip_results, chunksize=1000)
-                if pool is not None
-                else map(self._calculate_features_single, ms2pip_results)
+        with worker_pool(self.processes) as pool:
+            features = pool.imap(
+                self._calculate_features_single, ms2pip_results, chunksize=1000
             )
             for result, values in zip(ms2pip_results, features):
                 if values:
@@ -422,19 +428,19 @@ class MS2PIPAnnotator(MS2PIPFeatureGenerator):
 
         indices = sorted(matched)
         workers = processes if processes is not None else self.processes
-        os.environ["RAYON_NUM_THREADS"] = str(workers)
-        results = ms2pip.correlate(
-            psms=PSMList(psm_list=[matched[index] for index in indices]),
-            spectrum_file=None,
-            model=model,
-            model_dir=model_dir,
-            ms2_tolerance=ms2_tolerance,
-            ms2_tolerance_mode=ms2_tolerance_unit or self.ms2_tolerance_unit,
-            processes=workers,
-            compute_correlations=False,
-            add_retention_time=add_retention_time,
-            add_ion_mobility=add_ion_mobility,
-        )
+        with _rayon_threads(workers):
+            results = ms2pip.correlate(
+                psms=PSMList(psm_list=[matched[index] for index in indices]),
+                spectrum_file=None,
+                model=model,
+                model_dir=model_dir,
+                ms2_tolerance=ms2_tolerance,
+                ms2_tolerance_mode=ms2_tolerance_unit or self.ms2_tolerance_unit,
+                processes=workers,
+                compute_correlations=False,
+                add_retention_time=add_retention_time,
+                add_ion_mobility=add_ion_mobility,
+            )
         for result in results:
             result.psm_index = indices[result.psm_index]
             # Do not retain Rust spectrum objects in feature worker arguments.

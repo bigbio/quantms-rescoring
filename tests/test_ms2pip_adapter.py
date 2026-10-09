@@ -45,7 +45,9 @@ def test_matching_preserves_indices_duplicates_units_and_original_psms(
 ):
     psms = PSMList(psm_list=[make_psm("absent"), make_psm(), make_psm(rank=2)])
     monkeypatch.setattr(adapter, "read_spectrum_file", lambda _: iter([make_spectrum()]))
+    monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
     generator = adapter.MS2PIPAnnotator(ms2_tolerance_unit=unit, processes=1)
+    assert "RAYON_NUM_THREADS" not in os.environ
 
     def correlate(**kwargs):
         matched = kwargs["psms"]
@@ -71,6 +73,22 @@ def test_matching_preserves_indices_duplicates_units_and_original_psms(
     assert results[0].psm is psms[1]
     assert results[1].psm is psms[2]
     assert all(p.spectrum is None for p in psms)
+    assert "RAYON_NUM_THREADS" not in os.environ
+
+
+def test_existing_rayon_thread_setting_is_kept(monkeypatch):
+    monkeypatch.setattr(adapter, "read_spectrum_file", lambda _: iter([make_spectrum()]))
+    monkeypatch.setenv("RAYON_NUM_THREADS", "3")
+
+    def correlate(**kwargs):
+        assert os.environ["RAYON_NUM_THREADS"] == "3"
+        return [ProcessingResult(psm_index=0, psm=kwargs["psms"][0])]
+
+    monkeypatch.setattr(adapter.ms2pip, "correlate", correlate)
+    adapter.MS2PIPAnnotator(processes=8).custom_correlate(
+        PSMList(psm_list=[make_psm()]), "unused.mzML", spectrum_id_pattern=r"scan=(\d+)"
+    )
+    assert os.environ["RAYON_NUM_THREADS"] == "3"
 
 
 def test_charge_recovery_does_not_mutate_input(monkeypatch):

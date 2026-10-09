@@ -318,7 +318,7 @@ quantms-rescoring is optimized for HPC/Slurm environments and Nextflow workflows
 
 #### Thread Configuration
 
-The tool uses a single `--processes` parameter that directly maps to available CPUs. Each process uses 1 internal thread to avoid thread explosion when using multiprocessing.
+The tool uses a single `--processes` parameter that directly maps to available CPUs. Each process uses 1 internal thread to avoid thread explosion when using multiprocessing. MS2PIP's Rust stage instead runs as many threads in one process, unless `RAYON_NUM_THREADS` is already set. It runs before the feature workers start, so `--processes` still bounds the busy CPUs.
 
 **For Nextflow workflows:**
 
