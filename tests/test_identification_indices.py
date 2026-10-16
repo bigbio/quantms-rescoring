@@ -133,10 +133,10 @@ def test_merge_preserves_retained_source_identifications(
     assert ranks == ["1", "1", "3", "2"]
 
     ids = [row["peptide_identification_index"] for row in rows]
-    # Distinct spectra must not collide; same-spectrum source groups also stay separate.
-    assert len(set(ids[:3])) == 3
-    assert ids[2] == ids[3]
-    assert [row["hit_index"] for row in rows] == [0, 0, 0, 1]
+    # Distinct spectra must not collide; each spectrum's candidates share one identification.
+    assert ids[0] != ids[1]
+    assert ids[1] == ids[2] == ids[3]
+    assert [row["hit_index"] for row in rows] == [0, 0, 1, 2]
     assert table.schema.field("peptide_identification_index").type == pa.int32()
     assert table.schema.field("hit_index").type == pa.int32()
 

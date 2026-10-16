@@ -492,13 +492,11 @@ class ParquetRescoringReader(ParquetReader):
                     merged_psms[prov_key] = copy.copy(psm)
                     record["psm_metavalues"] = psm_metavalues
                     if len(self.parquet_dirs) > 1:
-                        # Preserve each source identification's metadata: even
-                        # the same spectrum can have different RT/m/z per engine.
-                        identification_key = (
-                            parquet_dir, row["run_identifier"], row["peptide_identification_index"]
-                        )
+                        # One identification per spectrum across engines: separate
+                        # ones each keep a top hit and a quantified feature downstream.
+                        # The highest-priority engine's RT/m/z becomes the identification's.
                         record["peptide_identification_index"] = identification_indices.setdefault(
-                            identification_key, len(identification_indices)
+                            row["spectrum_reference"], len(identification_indices)
                         )
                     merged_records[prov_key] = copy.copy(record)
                 else:
